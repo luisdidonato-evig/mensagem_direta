@@ -22,7 +22,7 @@ from app.security import hash_password
 
 logger = logging.getLogger(__name__)
 
-DEV_SEED_PASSWORD = "dev-local-only"
+DEV_SEED_PASSWORD = os.getenv("DEV_SEED_PASSWORD", "dev-local-only")
 DEV_COMPANY_ID = "00000000-0000-0000-0000-000000000001"
 DEV_GROUP_ID = "00000000-0000-0000-0000-000000000001"
 DEV_SEED_AGENTS = [
@@ -74,6 +74,7 @@ def create_app(
     meta_app_secret: str | None = None,
     meta_access_token: str | None = None,
     meta_phone_number_id: str | None = None,
+    meta_default_group_id: str | None = None,
     meta_graph_version: str | None = None,
     enable_simulator: bool | None = None,
     jwt_secret: str | None = None,
@@ -101,6 +102,7 @@ def create_app(
     resolved_app_secret = meta_app_secret or os.getenv("META_APP_SECRET", "")
     resolved_access_token = meta_access_token or os.getenv("META_ACCESS_TOKEN", "")
     resolved_phone_number_id = meta_phone_number_id or os.getenv("META_PHONE_NUMBER_ID", "")
+    resolved_default_group_id = meta_default_group_id or os.getenv("META_DEFAULT_GROUP_ID", "")
     resolved_graph_version = meta_graph_version or os.getenv("META_GRAPH_VERSION", "v23.0")
     simulator_enabled = enable_simulator
     if simulator_enabled is None:
@@ -154,6 +156,7 @@ def create_app(
     app.state.realtime = ConnectionManager(database.session_factory)
     app.state.meta_verify_token = resolved_verify_token
     app.state.meta_app_secret = resolved_app_secret
+    app.state.meta_default_group_id = resolved_default_group_id
     app.state.enable_simulator = simulator_enabled
     app.state.outbox_processor = outbox_processor
     app.state.jwt_secret = resolved_jwt_secret

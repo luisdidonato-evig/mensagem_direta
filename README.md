@@ -69,7 +69,9 @@ Rotas operacionais exigem `Authorization: Bearer <token>` com JWT (HS256) emitid
 
 Token expira em 12h (`ACCESS_TOKEN_TTL` em `app/security.py`). Papéis: `ATENDENTE`, `SUPERVISOR`, `ADMIN`.
 
-`ADMIN` cria novas contas via `POST /api/v1/agents` (`{id, role, password}`, senha mínima 8 caracteres) e lista via `GET /api/v1/agents`. Não há autoatendimento de cadastro nem redefinição de senha — ambos ficam para quando entrar RBAC definitivo.
+`ADMIN` gerencia contas e papéis no painel **Equipe e grupos**. `SUPERVISOR` vê os usuários da empresa e pode criar, editar, desativar e vincular **atendentes**; não altera contas de supervisores ou administradores. A edição de conta permite definir uma nova senha (mínimo 8 caracteres). Usuários com atendimento ativo precisam ter os atendimentos transferidos antes da desativação ou desvinculação. A última conta de administrador ativo não pode ser desativada ou rebaixada.
+
+No painel, o administrador também cria e edita grupos e a capacidade por atendente. Administrador e supervisor vinculam usuários aos grupos e podem definir uma capacidade individual. Atendentes veem apenas os grupos aos quais pertencem, filtram os atendimentos do grupo e puxam o próximo da fila. Ao simular uma nova entrada, selecione o grupo de destino. Admin e supervisor transferem um atendimento aberto para outro grupo, opcionalmente já atribuindo um usuário vinculado.
 
 Quando `ENABLE_SIMULATOR=true` (padrão em dev/teste), a aplicação semeia automaticamente na primeira subida, todos com senha `dev-local-only`:
 
@@ -106,5 +108,5 @@ O endpoint `GET` responde ao desafio de verificação. O `POST` aceita mensagens
 - Worker atual roda no processo da API; usar fila/worker dedicado antes de escalar horizontalmente.
 - Mídia JPEG/PNG (até 5 MB) e PDF (até 16 MB) usa `MEDIA_STORAGE_DIR` privado (padrão: `media` ao lado do banco SQLite). O painel envia anexo e baixa arquivo com autenticação. Homologação com a conta Meta, templates e tratamento assíncrono do webhook ainda faltam.
 - Status da Meta com `biz_opaque_callback_data` reconcilia envio cujo retorno local se perdeu. Sem esse callback, a Graph API não oferece idempotência equivalente; uma retentativa ainda pode duplicar a resposta.
-- Grupos, associação de agentes, capacidade e distribuição por chamada já existem na API. Painel filtra por grupo e permite ao atendente puxar o próximo; administração de grupos/agentes ainda é via API.
+- O simulador cria entradas no grupo selecionado. Para a Meta, configure `META_DEFAULT_GROUP_ID` com o ID do grupo que recebe as novas mensagens do número conectado; sem ele, a entrada só é aceita quando existe exatamente um grupo ativo. Múltiplos números ou regras de triagem por grupo ainda exigem configuração própria.
 - O piloto prevê uma única empresa. Antes de ativar empresas adicionais, separar dados de contato, credenciais Meta e jobs por empresa.

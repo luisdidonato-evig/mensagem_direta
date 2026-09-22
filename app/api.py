@@ -106,8 +106,10 @@ def login(payload: LoginRequest, request: Request, session: SessionDep) -> dict:
 
 @router.post("/agents", response_model=AgentRead, status_code=201)
 def create_agent(payload: AgentCreate, session: SessionDep, actor: ActorDep) -> Agent:
-    if actor.role != ActorRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Apenas administrador cria contas de agente")
+    if actor.role not in {ActorRole.ADMIN, ActorRole.SUPERVISOR}:
+        raise HTTPException(status_code=403, detail="Apenas gestão cria contas de agente")
+    if actor.role == ActorRole.SUPERVISOR and payload.role != ActorRole.ATENDENTE:
+        raise HTTPException(status_code=403, detail="Supervisor só pode criar atendentes")
     if session.get(Agent, payload.id) is not None:
         raise HTTPException(status_code=409, detail="Já existe agente com esse identificador")
     agent = Agent(
@@ -124,8 +126,8 @@ def create_agent(payload: AgentCreate, session: SessionDep, actor: ActorDep) -> 
 
 @router.get("/agents", response_model=list[AgentRead])
 def list_agents(session: SessionDep, actor: ActorDep) -> list[Agent]:
-    if actor.role != ActorRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Apenas administrador vê contas de agente")
+    if actor.role not in {ActorRole.ADMIN, ActorRole.SUPERVISOR}:
+        raise HTTPException(status_code=403, detail="Apenas gestão vê contas de agente")
     return list(
         session.scalars(
             select(Agent).where(Agent.company_id == actor.company_id).order_by(Agent.id)
@@ -137,34 +139,45 @@ def list_agents(session: SessionDep, actor: ActorDep) -> list[Agent]:
 def update_agent(
     agent_id: str, payload: AgentUpdate, session: SessionDep, actor: ActorDep
 ) -> Agent:
-    if actor.role != ActorRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Apenas administrador edita contas de agente")
+    if actor.role not in {ActorRole.ADMIN, ActorRole.SUPERVISOR}:
+        raise HTTPException(status_code=403, detail="Apenas gestão edita contas de agente")
     agent = session.get(Agent, agent_id)
     if agent is None or agent.company_id != actor.company_id:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
+    if actor.role == ActorRole.SUPERVISOR:
+        if agent.role != ActorRole.ATENDENTE or (payload.role is not None and payload.role != ActorRole.ATENDENTE):
+            raise HTTPException(status_code=403, detail="Supervisor só pode editar atendentes")
+    if agent.role == ActorRole.ADMIN and (
+        (payload.role is not None and payload.role != ActorRole.ADMIN)
+        or payload.active is False
+    ):
+        other_admin = session.scalar(
+            select(Agent.id).where(
+                Agent.company_id == actor.company_id,
+                Agent.role == ActorRole.ADMIN,
+                Agent.active.is_(True),
+                Agent.id != agent_id,
+            )
+        )
+        if other_admin is None:
+            raise HTTPException(status_code=409, detail="A empresa precisa de um administrador ativo")
     if payload.role is not None:
         agent.role = payload.role
     if payload.password is not None:
         agent.password_hash = hash_password(payload.password)
     if payload.active is not None:
         if not payload.active:
-            active_group_ids = session.scalars(
-                select(GroupAgent.group_id).where(
-                    GroupAgent.agent_id == agent_id, GroupAgent.active.is_(True)
+            open_attendance = session.scalar(
+                select(Attendance.id).where(
+                    Attendance.assignee_id == agent_id,
+                    Attendance.status.in_(ACTIVE_STATUSES),
                 )
-            ).all()
-            if active_group_ids:
-                open_attendance = session.scalar(
-                    select(Attendance.id).where(
-                        Attendance.assignee_id == agent_id,
-                        Attendance.status.in_(ACTIVE_STATUSES),
-                    )
+            )
+            if open_attendance is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Usuário com atendimento ativo não pode ser desativado sem transferência",
                 )
-                if open_attendance is not None:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Atendente com atendimento ativo não pode ser desativado sem transferência",
-                    )
         agent.active = payload.active
     session.commit()
     session.refresh(agent)
@@ -238,12 +251,18 @@ def link_group_agent(
     session: SessionDep,
     actor: ActorDep,
 ) -> GroupAgent:
-    if actor.role != ActorRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Apenas administrador vincula agentes a grupos")
-    load_group(session, actor, group_id)
+    if actor.role not in {ActorRole.ADMIN, ActorRole.SUPERVISOR}:
+        raise HTTPException(status_code=403, detail="Apenas gestão vincula agentes a grupos")
+    group = load_group(session, actor, group_id)
+    if not group.active:
+        raise HTTPException(status_code=409, detail="Grupo de atendimento inativo")
     agent = session.get(Agent, agent_id)
     if agent is None or agent.company_id != actor.company_id:
         raise HTTPException(status_code=404, detail="Agente não encontrado")
+    if not agent.active:
+        raise HTTPException(status_code=409, detail="Usuário inativo")
+    if actor.role == ActorRole.SUPERVISOR and agent.role != ActorRole.ATENDENTE:
+        raise HTTPException(status_code=403, detail="Supervisor só pode vincular atendentes")
     link = session.get(GroupAgent, (group_id, agent_id))
     if link is None:
         link = GroupAgent(group_id=group_id, agent_id=agent_id)
@@ -259,9 +278,12 @@ def link_group_agent(
 def unlink_group_agent(
     group_id: str, agent_id: str, session: SessionDep, actor: ActorDep
 ) -> None:
-    if actor.role != ActorRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Apenas administrador desvincula agentes de grupos")
+    if actor.role not in {ActorRole.ADMIN, ActorRole.SUPERVISOR}:
+        raise HTTPException(status_code=403, detail="Apenas gestão desvincula agentes de grupos")
     load_group(session, actor, group_id)
+    agent = session.get(Agent, agent_id)
+    if actor.role == ActorRole.SUPERVISOR and (agent is None or agent.role != ActorRole.ATENDENTE):
+        raise HTTPException(status_code=403, detail="Supervisor só pode desvincular atendentes")
     link = session.get(GroupAgent, (group_id, agent_id))
     if link is None or not link.active:
         raise HTTPException(status_code=404, detail="Vínculo não encontrado")
@@ -279,6 +301,20 @@ def unlink_group_agent(
         )
     link.active = False
     session.commit()
+
+
+@router.get("/groups/memberships", response_model=list[GroupAgentRead])
+def list_group_memberships(session: SessionDep, actor: ActorDep) -> list[GroupAgent]:
+    if actor.role not in {ActorRole.ADMIN, ActorRole.SUPERVISOR}:
+        raise HTTPException(status_code=403, detail="Apenas gestão vê vínculos de grupos")
+    return list(
+        session.scalars(
+            select(GroupAgent)
+            .join(ServiceGroup, ServiceGroup.id == GroupAgent.group_id)
+            .where(ServiceGroup.company_id == actor.company_id, GroupAgent.active.is_(True))
+            .order_by(GroupAgent.group_id, GroupAgent.agent_id)
+        )
+    )
 
 
 @router.get("/me/groups", response_model=list[GroupRead])
@@ -772,6 +808,7 @@ async def receive_meta_webhook(
                         external_message_id=external_id,
                         contact_id=contact_id,
                         content=content,
+                        group_id=request.app.state.meta_default_group_id or None,
                     ),
                     request,
                     session,
@@ -1537,6 +1574,8 @@ async def transfer_attendance(
         target_agent = session.get(Agent, target_actor_id)
         if target_agent is None or target_agent.company_id != actor.company_id:
             raise HTTPException(status_code=404, detail="Atendente de destino não encontrado")
+        if not target_agent.active:
+            raise HTTPException(status_code=422, detail="Atendente de destino inativo")
         if target_group_id is not None:
             link = session.get(GroupAgent, (target_group_id, target_actor_id))
             if link is None or not link.active:

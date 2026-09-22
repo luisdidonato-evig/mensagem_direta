@@ -163,6 +163,28 @@ input, select, textarea { border: 1px solid var(--line); border-radius: 8px; col
 .owner-dot.assigned { background: var(--teal); }
 .empty { display: grid; place-items: center; min-height: 92px; border: 1px dashed #d1d5db; border-radius: 9px; color: #969ca6; background: rgb(255 255 255 / 38%); font-size: 12px; }
 
+.team-view { height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(320px, 1fr) minmax(380px, 1.2fr); gap: 16px; padding-top: 14px; }
+.management-panel { min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.management-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+.management-head h2 { margin: 0 0 3px; font-size: 17px; }
+.management-head p { margin: 0; color: var(--muted); font-size: 11px; }
+.management-list { min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 16px; overflow-y: auto; }
+.management-item { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: #fafbfc; }
+.management-item-main { display: flex; align-items: center; gap: 10px; }
+.management-item-main strong { display: block; font-size: 13px; }
+.management-item-main small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.management-item p { margin: 0; color: #59616e; font-size: 11px; }
+.management-item .button { min-height: 30px; padding: 5px 10px; font-size: 10px; }
+.management-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.member-list { width: 100%; display: flex; flex-direction: column; gap: 4px; }
+.member-list > small { color: var(--muted); }
+.member-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 11px; }
+.member-row > span:last-child { white-space: nowrap; }
+.danger-text { color: var(--danger); }
+.modal select { width: 100%; padding: 11px; }
+.modal .check-field { flex-direction: row; align-items: center; }
+.modal .check-field input { width: auto; }
+
 .avatar {
   flex: 0 0 auto;
   display: grid;
@@ -286,11 +308,14 @@ input, select, textarea { border: 1px solid var(--line); border-radius: 8px; col
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 @media (max-width: 1050px) {
-  .identity { display: none; }
+  .identity .session-actor { display: none; }
   .select-filter > span { display: none; }
   .search-field { min-width: 190px; }
   .detail-panel { grid-template-columns: 1fr 310px; }
   .metrics-strip { grid-template-columns: repeat(3, 1fr); }
+  .team-view { height: 100%; display: block; overflow-y: auto; }
+  .management-panel { display: block; height: auto; min-height: 0; margin-bottom: 16px; overflow: visible; }
+  .management-list { overflow: visible; }
 }
 
 @media (max-width: 760px) {
@@ -298,16 +323,19 @@ input, select, textarea { border: 1px solid var(--line); border-radius: 8px; col
   .sidebar { width: 58px; }
   .logo { width: 38px; height: 38px; }
   .app-shell { margin-left: 58px; }
-  .topbar { align-items: flex-start; padding: 18px; }
-  .topbar p, .button.ghost { display: none; }
-  .top-actions { align-items: stretch; }
+  .topbar { align-items: flex-start; flex-wrap: wrap; padding: 18px; }
+  .topbar p, .topbar .button.ghost { display: none; }
+  .top-actions { align-items: stretch; flex-wrap: wrap; }
+  .topbar #pull-button { display: inline-flex; }
   .button.primary { font-size: 12px; }
   main { padding: 0 14px 14px; }
   .filterbar { flex-wrap: wrap; }
   .metrics-strip { grid-template-columns: repeat(2, 1fr); }
   .filter-spacer, .select-filter { display: none; }
+  .group-filter-field { display: flex; }
   .search-field { min-width: 0; flex: 1; }
   .board { min-height: 620px; grid-auto-columns: 260px; }
+  .team-view { height: auto; }
   .detail-panel { left: 0; width: 100vw; grid-template-columns: 1fr; }
   .contact-pane { display: none; }
 }

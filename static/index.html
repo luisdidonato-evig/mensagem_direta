@@ -13,6 +13,7 @@
         <button class="nav-item" title="Início" aria-label="Início"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19.5z"/><path d="M9 21v-7h6v7"/></svg></button>
         <button id="nav-attendances" class="nav-item active" title="Atendimentos" aria-label="Atendimentos"><svg viewBox="0 0 24 24"><path d="M5 18.5A3.5 3.5 0 0 1 1.5 15V8A3.5 3.5 0 0 1 5 4.5h14A3.5 3.5 0 0 1 22.5 8v7a3.5 3.5 0 0 1-3.5 3.5H9L4 22v-3.5z"/></svg></button>
         <button id="nav-contacts" class="nav-item" title="Contatos" aria-label="Contatos"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1.5A4.5 4.5 0 0 1 8 13h2a4.5 4.5 0 0 1 4.5 4.5V19"/><path d="M16 5.5a3 3 0 0 1 0 5.8M16.5 14a4 4 0 0 1 4 4v1"/></svg></button>
+        <button id="nav-team" class="nav-item" title="Equipe e grupos" aria-label="Equipe e grupos" hidden><svg viewBox="0 0 24 24"><circle cx="8" cy="8" r="3"/><circle cx="17" cy="9" r="2"/><path d="M2 20v-2a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v2zM15 15h2a4 4 0 0 1 4 4v1h-5"/></svg></button>
         <button class="nav-item" title="Relatórios" aria-label="Relatórios"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20V7"/></svg></button>
       </nav>
       <div class="sidebar-bottom"><span class="avatar small">AG</span><small>v0.1</small></div>
@@ -39,7 +40,7 @@
             <label class="search-field"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="search" type="search" placeholder="Buscar contato ou protocolo" /></label>
             <span class="filter-spacer"></span>
             <label class="select-filter"><span>Tags</span><select id="attendance-tag-filter"><option value="">Todas</option></select></label>
-            <label class="select-filter"><span>Grupo</span><select id="group-filter"><option value="">Todos</option></select></label>
+            <label class="select-filter group-filter-field"><span>Grupo</span><select id="group-filter"><option value="">Todos</option></select></label>
             <label class="select-filter"><span>Responsável</span><select id="owner-filter"><option value="all">Todos</option><option value="mine">Comigo</option><option value="unassigned">Sem responsável</option></select></label>
             <label class="select-filter"><span>Status</span><select id="status-filter"><option value="all">Todos</option><option value="open">Somente abertos</option><option value="closed">Encerrados</option></select></label>
             <label class="select-filter"><span>Ordenação</span><select id="sort-filter"><option value="recent">Mais recentes</option><option value="oldest">Mais antigos</option><option value="contact">Contato A–Z</option></select></label>
@@ -64,6 +65,17 @@
             <label class="select-filter"><span>Ordenação</span><select id="contacts-sort"><option value="recent">Mais recentes</option><option value="oldest">Mais antigos</option><option value="contact">Contato A–Z</option></select></label>
           </section>
           <section id="contacts-board" class="board" aria-label="Contatos por estágio"></section>
+        </div>
+
+        <div id="team-view" class="team-view" hidden>
+          <section class="management-panel">
+            <header class="management-head"><div><h2>Usuários</h2><p>Contas e permissões da empresa</p></div><button id="new-agent-button" class="button primary" type="button">＋ Usuário</button></header>
+            <div id="agents-list" class="management-list"></div>
+          </section>
+          <section class="management-panel">
+            <header class="management-head"><div><h2>Grupos de atendimento</h2><p>Vínculos e capacidade da equipe</p></div><button id="new-group-button" class="button primary" type="button" hidden>＋ Grupo</button></header>
+            <div id="groups-list" class="management-list"></div>
+          </section>
         </div>
       </main>
     </div>
@@ -115,8 +127,48 @@
       <form id="inbound-form">
         <header><div><h2>Novo atendimento</h2><p>Simule uma mensagem recebida pelo WhatsApp.</p></div><button type="button" id="close-inbound-dialog" class="icon-button">×</button></header>
         <label>Identificador do contato<input id="inbound-contact" value="contato-demo" required /></label>
+        <label>Grupo de atendimento<select id="inbound-group" required></select></label>
         <label>Primeira mensagem<textarea id="inbound-content" rows="5" required placeholder="Digite a mensagem recebida"></textarea></label>
         <button class="button primary full" type="submit">Criar atendimento</button>
+      </form>
+    </dialog>
+
+    <dialog id="agent-dialog" class="modal">
+      <form id="agent-form">
+        <header><div><h2 id="agent-dialog-title">Novo usuário</h2><p id="agent-dialog-help">Cadastre uma conta para a equipe.</p></div><button type="button" id="close-agent-dialog" class="icon-button">×</button></header>
+        <label>Identificador<input id="agent-id" maxlength="120" required /></label>
+        <label id="agent-role-label">Papel<select id="agent-role"><option value="ATENDENTE">Atendente</option><option value="SUPERVISOR">Supervisor</option><option value="ADMIN">Administrador</option></select></label>
+        <label>Senha<input id="agent-password" type="password" minlength="8" maxlength="200" autocomplete="new-password" /><small id="agent-password-help">Mínimo de 8 caracteres.</small></label>
+        <label id="agent-active-label" class="check-field"><input id="agent-active" type="checkbox" checked /> Conta ativa</label>
+        <button class="button primary full" type="submit">Salvar usuário</button>
+      </form>
+    </dialog>
+
+    <dialog id="group-dialog" class="modal">
+      <form id="group-form">
+        <header><div><h2 id="group-dialog-title">Novo grupo</h2><p>Defina a fila e a capacidade por atendente.</p></div><button type="button" id="close-group-dialog" class="icon-button">×</button></header>
+        <label>Nome<input id="group-name" maxlength="120" required /></label>
+        <label>Capacidade por atendente<input id="group-capacity" type="number" min="1" required /></label>
+        <label id="group-active-label" class="check-field"><input id="group-active" type="checkbox" checked /> Grupo ativo</label>
+        <button class="button primary full" type="submit">Salvar grupo</button>
+      </form>
+    </dialog>
+
+    <dialog id="membership-dialog" class="modal">
+      <form id="membership-form">
+        <header><div><h2 id="membership-dialog-title">Vincular usuário</h2><p>Atendentes recebem atendimentos dos grupos aos quais pertencem.</p></div><button type="button" id="close-membership-dialog" class="icon-button">×</button></header>
+        <label>Usuário<select id="membership-agent" required></select></label>
+        <label>Capacidade específica<input id="membership-capacity" type="number" min="1" placeholder="Usar capacidade do grupo" /><small>Deixe vazio para usar a capacidade do grupo.</small></label>
+        <button class="button primary full" type="submit">Salvar vínculo</button>
+      </form>
+    </dialog>
+
+    <dialog id="transfer-dialog" class="modal">
+      <form id="transfer-form">
+        <header><div><h2>Transferir atendimento</h2><p>Escolha um grupo e, se desejar, um responsável.</p></div><button type="button" id="close-transfer-dialog" class="icon-button">×</button></header>
+        <label>Grupo de destino<select id="transfer-group" required></select></label>
+        <label>Responsável<select id="transfer-agent"><option value="">Fila do grupo, sem responsável</option></select></label>
+        <button class="button primary full" type="submit">Transferir</button>
       </form>
     </dialog>
 

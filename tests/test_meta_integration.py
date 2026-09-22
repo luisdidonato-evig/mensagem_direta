@@ -11,8 +11,8 @@ from conftest import login_headers
 
 from app.domain import DeliveryStatus, MessageDirection
 from app.integration import MetaCloudApiSender, OutboxProcessor
-from app.main import create_app
-from app.models import Message, OutboxMessage
+from app.main import DEV_COMPANY_ID, create_app
+from app.models import Message, OutboxMessage, ServiceGroup
 
 APP_SECRET = "meta-app-secret-de-teste"
 VERIFY_TOKEN = "meta-verify-token-de-teste"
@@ -130,6 +130,33 @@ def test_meta_webhook_requires_valid_signature(tmp_path):
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Assinatura ausente"
+
+
+def test_meta_inbound_uses_configured_group_with_multiple_active_groups(tmp_path):
+    target_group_id = "00000000-0000-0000-0000-000000000002"
+    app = create_app(
+        f"sqlite:///{(tmp_path / 'group-routing.db').as_posix()}",
+        meta_app_secret=APP_SECRET,
+        meta_default_group_id=target_group_id,
+    )
+    with TestClient(app) as client:
+        with app.state.database.session_factory() as session:
+            session.add(ServiceGroup(
+                id=target_group_id,
+                company_id=DEV_COMPANY_ID,
+                name="WhatsApp",
+            ))
+            session.commit()
+        response = post_meta(client, inbound_webhook("wamid.group.1"))
+        listed = client.get(
+            "/api/v1/attendances", headers=login_headers(client, "admin-1")
+        )
+
+    assert response.status_code == 200
+    assert response.json()["processed"] == 1
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+    assert listed.json()[0]["group_id"] == target_group_id
 
 
 def test_meta_inbound_is_idempotent_and_updates_contact(tmp_path):

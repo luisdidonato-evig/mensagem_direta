@@ -23,6 +23,11 @@ const state = {
   contacts: [],
   contactsLoaded: false,
   groups: [],
+  agents: [],
+  memberships: [],
+  editingAgentId: null,
+  editingGroupId: null,
+  membershipGroupId: null,
   quickReplies: [],
   selectedId: null,
   selected: null,
@@ -80,6 +85,7 @@ async function api(path, options = {}) {
     const error = await response.json().catch(() => ({ detail: "Falha inesperada" }));
     throw new Error(error.detail || `HTTP ${response.status}`);
   }
+  if (response.status === 204) return null;
   return response.json();
 }
 
@@ -163,7 +169,15 @@ async function loadGroups() {
       .map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`)
       .join("");
     select.value = current;
+    const inbound = $("#inbound-group");
+    const inboundCurrent = inbound.value;
+    inbound.innerHTML = '<option value="">Selecione um grupo</option>' + state.groups
+      .filter((group) => group.active)
+      .map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`).join("");
+    inbound.value = inboundCurrent || (state.groups.filter((group) => group.active).length === 1 ? state.groups.find((group) => group.active).id : "");
     $("#pull-button").hidden = state.actor?.role !== "ATENDENTE";
+    if (state.view === "team") renderManagement();
+    renderBoard();
   } catch (error) { toast(error.message); }
 }
 
@@ -213,7 +227,7 @@ function renderBoard() {
         </span>
         ${tags ? `<span class="card-tags">${tags}</span>` : ""}
         <span class="card-foot">
-          <span><i class="owner-dot ${item.assignee_id ? "assigned" : ""}"></i>${escapeHtml(item.assignee_id || "Sem responsável")}</span>
+          <span><i class="owner-dot ${item.assignee_id ? "assigned" : ""}"></i>${escapeHtml(item.assignee_id || "Sem responsável")} · ${escapeHtml(state.groups.find((group) => group.id === item.group_id)?.name || "Fila central")}</span>
           <span>${relativeTime(item.updated_at)}</span>
         </span>
       </button>
@@ -244,16 +258,207 @@ function switchView(view) {
   state.view = view;
   $("#nav-attendances").classList.toggle("active", view === "attendances");
   $("#nav-contacts").classList.toggle("active", view === "contacts");
+  $("#nav-team").classList.toggle("active", view === "team");
   $("#attendances-view").hidden = view !== "attendances";
   $("#contacts-view").hidden = view !== "contacts";
+  $("#team-view").hidden = view !== "team";
+  $("#new-message-button").hidden = view === "team";
+  $("#pull-button").hidden = view !== "attendances" || state.actor?.role !== "ATENDENTE";
+  $("#outbox-button").hidden = view === "team" || state.actor?.role === "ATENDENTE";
   if (view === "attendances") {
     $("#page-title").textContent = "Atendimentos";
     $("#page-subtitle").textContent = "Acompanhe e responda conversas em um só lugar.";
-  } else {
+  } else if (view === "contacts") {
     $("#page-title").textContent = "Contatos";
     $("#page-subtitle").textContent = "Classifique contatos e retome conversas.";
     if (!state.contactsLoaded) loadContacts();
+  } else {
+    $("#page-title").textContent = "Equipe e grupos";
+    $("#page-subtitle").textContent = "Gerencie usuários, vínculos e filas de atendimento.";
+    loadManagement();
   }
+}
+
+const canManageAgent = (agent) => state.actor?.role === "ADMIN" || agent?.role === "ATENDENTE";
+const roleLabel = (role) => ({ ATENDENTE: "Atendente", SUPERVISOR: "Supervisor", ADMIN: "Administrador" })[role] || role;
+
+async function loadManagement() {
+  try {
+    const [agents, memberships, groups] = await Promise.all([
+      api("/api/v1/agents"), api("/api/v1/groups/memberships"), api("/api/v1/groups"),
+    ]);
+    state.agents = agents;
+    state.memberships = memberships;
+    state.groups = groups;
+    renderManagement();
+  } catch (error) { toast(error.message); }
+}
+
+function renderManagement() {
+  const groupName = (id) => state.groups.find((group) => group.id === id)?.name || id;
+  const memberActions = (group, link) => {
+    if (!canManageAgent(state.agents.find((agent) => agent.id === link.agent_id))) return "";
+    return `<button type="button" class="text-button" data-edit-membership="${escapeHtml(group.id)}" data-agent-id="${escapeHtml(link.agent_id)}">Editar</button><button type="button" class="text-button danger-text" data-unlink-group="${escapeHtml(group.id)}" data-agent-id="${escapeHtml(link.agent_id)}">Desvincular</button>`;
+  };
+  $("#agents-list").innerHTML = state.agents.length ? state.agents.map((agent) => {
+    const links = state.memberships.filter((link) => link.agent_id === agent.id);
+    return `<article class="management-item">
+      <div class="management-item-main"><span class="avatar">${escapeHtml(initials(agent.id))}</span><div><strong>${escapeHtml(agent.id)}</strong><small>${roleLabel(agent.role)} · ${agent.active ? "Ativo" : "Inativo"}</small></div></div>
+      <p>${links.length ? links.map((link) => escapeHtml(groupName(link.group_id))).join(" · ") : "Sem grupos vinculados"}</p>
+      ${canManageAgent(agent) ? `<button type="button" class="button ghost" data-edit-agent="${escapeHtml(agent.id)}">Editar usuário</button>` : ""}
+    </article>`;
+  }).join("") : '<div class="empty">Nenhum usuário</div>';
+
+  $("#groups-list").innerHTML = state.groups.length ? state.groups.map((group) => {
+    const links = state.memberships.filter((link) => link.group_id === group.id);
+    return `<article class="management-item">
+      <div class="management-item-main"><div><strong>${escapeHtml(group.name)}</strong><small>${group.active ? "Ativo" : "Inativo"} · capacidade ${group.max_load_per_agent} por atendente</small></div></div>
+      <div class="member-list">${links.length ? links.map((link) => `<div class="member-row"><span>${escapeHtml(link.agent_id)}${link.max_load_override ? ` · limite ${link.max_load_override}` : ""}</span><span>${memberActions(group, link)}</span></div>`).join("") : '<small>Nenhum usuário vinculado</small>'}</div>
+      <div class="management-actions"><button type="button" class="button ghost" data-link-group="${escapeHtml(group.id)}" ${group.active ? "" : "disabled"}>＋ Vincular usuário</button>${state.actor?.role === "ADMIN" ? `<button type="button" class="button ghost" data-edit-group="${escapeHtml(group.id)}">Editar grupo</button>` : ""}</div>
+    </article>`;
+  }).join("") : '<div class="empty">Nenhum grupo</div>';
+}
+
+function openAgentDialog(agentId = null) {
+  const agent = state.agents.find((item) => item.id === agentId);
+  state.editingAgentId = agent?.id || null;
+  $("#agent-dialog-title").textContent = agent ? "Editar usuário" : "Novo usuário";
+  $("#agent-dialog-help").textContent = agent ? "Altere papel, senha ou situação da conta." : "Cadastre uma conta para a equipe.";
+  $("#agent-id").value = agent?.id || "";
+  $("#agent-id").disabled = Boolean(agent);
+  $("#agent-role").value = agent?.role || "ATENDENTE";
+  $("#agent-role-label").hidden = state.actor?.role !== "ADMIN";
+  $("#agent-active-label").hidden = !agent;
+  $("#agent-active").checked = agent?.active ?? true;
+  $("#agent-password").value = "";
+  $("#agent-password").required = !agent;
+  $("#agent-password-help").textContent = agent ? "Deixe vazio para manter a senha atual." : "Mínimo de 8 caracteres.";
+  $("#agent-dialog").showModal();
+}
+
+async function saveAgent(event) {
+  event.preventDefault();
+  const id = state.editingAgentId;
+  const password = $("#agent-password").value;
+  const role = state.actor?.role === "ADMIN" ? $("#agent-role").value : "ATENDENTE";
+  const payload = id ? { active: $("#agent-active").checked } : { id: $("#agent-id").value.trim(), role, password };
+  if (id && state.actor?.role === "ADMIN") payload.role = role;
+  if (id && password) payload.password = password;
+  try {
+    await api(id ? `/api/v1/agents/${encodeURIComponent(id)}` : "/api/v1/agents", {
+      method: id ? "PATCH" : "POST", body: JSON.stringify(payload),
+    });
+    $("#agent-dialog").close();
+    await loadManagement();
+    toast(id ? "Usuário atualizado" : "Usuário criado");
+  } catch (error) { toast(error.message); }
+}
+
+function openGroupDialog(groupId = null) {
+  const group = state.groups.find((item) => item.id === groupId);
+  state.editingGroupId = group?.id || null;
+  $("#group-dialog-title").textContent = group ? "Editar grupo" : "Novo grupo";
+  $("#group-name").value = group?.name || "";
+  $("#group-capacity").value = group?.max_load_per_agent || 5;
+  $("#group-active-label").hidden = !group;
+  $("#group-active").checked = group?.active ?? true;
+  $("#group-dialog").showModal();
+}
+
+async function saveGroup(event) {
+  event.preventDefault();
+  const id = state.editingGroupId;
+  const payload = { name: $("#group-name").value.trim(), max_load_per_agent: Number($("#group-capacity").value) };
+  if (id) payload.active = $("#group-active").checked;
+  try {
+    await api(id ? `/api/v1/groups/${encodeURIComponent(id)}` : "/api/v1/groups", {
+      method: id ? "PATCH" : "POST", body: JSON.stringify(payload),
+    });
+    $("#group-dialog").close();
+    await loadManagement();
+    await loadGroups();
+    await loadBoard();
+    toast(id ? "Grupo atualizado" : "Grupo criado");
+  } catch (error) { toast(error.message); }
+}
+
+function openMembershipDialog(groupId, agentId = null) {
+  const group = state.groups.find((item) => item.id === groupId);
+  if (!group) return;
+  state.membershipGroupId = groupId;
+  $("#membership-dialog-title").textContent = `Vínculo · ${group.name}`;
+  const eligible = state.agents.filter((agent) => agent.active && canManageAgent(agent));
+  if (agentId && !eligible.some((agent) => agent.id === agentId)) { toast("Usuário indisponível para edição"); return; }
+  $("#membership-agent").innerHTML = eligible.map((agent) => `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.id)} · ${roleLabel(agent.role)}</option>`).join("");
+  $("#membership-agent").value = agentId || eligible.find((agent) => agent.role === "ATENDENTE")?.id || eligible[0]?.id || "";
+  $("#membership-agent").disabled = Boolean(agentId);
+  const link = state.memberships.find((item) => item.group_id === groupId && item.agent_id === agentId);
+  $("#membership-capacity").value = link?.max_load_override || "";
+  if (!eligible.length) { toast("Cadastre um usuário ativo para vincular"); return; }
+  $("#membership-dialog").showModal();
+}
+
+async function saveMembership(event) {
+  event.preventDefault();
+  const groupId = state.membershipGroupId;
+  const agentId = $("#membership-agent").value;
+  const capacity = $("#membership-capacity").value;
+  try {
+    await api(`/api/v1/groups/${encodeURIComponent(groupId)}/agents/${encodeURIComponent(agentId)}`, {
+      method: "PUT", body: JSON.stringify({ max_load_override: capacity ? Number(capacity) : null }),
+    });
+    $("#membership-dialog").close();
+    await loadManagement();
+    toast("Vínculo salvo");
+  } catch (error) { toast(error.message); }
+}
+
+async function unlinkMembership(groupId, agentId) {
+  try {
+    await api(`/api/v1/groups/${encodeURIComponent(groupId)}/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" });
+    await loadManagement();
+    toast("Usuário desvinculado");
+  } catch (error) { toast(error.message); }
+}
+
+function populateTransferAgents() {
+  const groupId = $("#transfer-group").value;
+  const candidates = state.agents.filter((agent) => agent.active && state.memberships.some((link) => link.group_id === groupId && link.agent_id === agent.id));
+  $("#transfer-agent").innerHTML = '<option value="">Fila do grupo, sem responsável</option>' + candidates
+    .map((agent) => `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.id)}</option>`).join("");
+}
+
+async function openTransferDialog() {
+  try {
+    const [agents, memberships, groups] = await Promise.all([
+      api("/api/v1/agents"), api("/api/v1/groups/memberships"), api("/api/v1/groups"),
+    ]);
+    state.agents = agents;
+    state.memberships = memberships;
+    state.groups = groups;
+    $("#transfer-group").innerHTML = state.groups.filter((group) => group.active)
+      .map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`).join("");
+    $("#transfer-group").value = state.selected.group_id;
+    if (!$("#transfer-group").value) $("#transfer-group").selectedIndex = 0;
+    populateTransferAgents();
+    $("#transfer-agent").value = state.selected.assignee_id || "";
+    $("#transfer-dialog").showModal();
+  } catch (error) { toast(error.message); }
+}
+
+async function transferSelected(event) {
+  event.preventDefault();
+  const groupId = $("#transfer-group").value;
+  const agentId = $("#transfer-agent").value;
+  try {
+    await api(`/api/v1/attendances/${state.selectedId}/transfer`, {
+      method: "POST",
+      body: JSON.stringify({ target_group_id: groupId, target_actor_id: agentId || null, expected_version: state.selected.version }),
+    });
+    $("#transfer-dialog").close();
+    await refreshSelected();
+    toast("Atendimento transferido");
+  } catch (error) { toast(error.message); await refreshSelected(); }
 }
 
 function contactTagOptions() {
@@ -450,18 +655,24 @@ function renderDetail() {
   });
 
   const actions = [];
+  const manager = ["SUPERVISOR", "ADMIN"].includes(state.actor?.role);
+  const canOperate = manager || item.assignee_id === state.actor?.id;
   if (item.status === "AGUARDANDO" && !item.assignee_id) actions.push('<button class="button primary" data-action="claim">Assumir atendimento</button>');
-  if (item.status === "EM_ATENDIMENTO") {
+  if (item.status === "EM_ATENDIMENTO" && canOperate) {
     actions.push(actionButton("Aguardar cliente", "AGUARDANDO_CLIENTE"));
     actions.push(actionButton("Aguardar interno", "AGUARDANDO_INTERNO"));
     actions.push('<button class="button danger" data-action="close">Encerrar</button>');
   }
-  if (["AGUARDANDO_CLIENTE", "AGUARDANDO_INTERNO"].includes(item.status)) actions.push(actionButton("Retomar atendimento", "EM_ATENDIMENTO"));
+  if (["AGUARDANDO_CLIENTE", "AGUARDANDO_INTERNO"].includes(item.status) && canOperate) actions.push(actionButton("Retomar atendimento", "EM_ATENDIMENTO"));
+  if (item.status !== "ENCERRADO" && manager) actions.push('<button class="button ghost" data-action="transfer">Transferir</button>');
   $("#detail-actions").innerHTML = actions.join("") || '<small>Sem ações disponíveis</small>';
 
-  const canSend = item.status !== "ENCERRADO" && (Boolean(item.assignee_id) || ["SUPERVISOR", "ADMIN"].includes(state.actor?.role));
+  const canSend = item.status !== "ENCERRADO" && canOperate;
   $("#open-composer").hidden = !canSend;
+  $("#edit-attendance-tags").hidden = !canOperate;
+  $("#edit-contact").hidden = !canOperate;
   $("[data-action='claim']")?.addEventListener("click", claimSelected);
+  $("[data-action='transfer']")?.addEventListener("click", openTransferDialog);
   $("[data-action='close']")?.addEventListener("click", () => $("#closure-dialog").showModal());
   document.querySelectorAll("[data-status]").forEach((button) => button.addEventListener("click", () => changeStatus(button.dataset.status)));
 }
@@ -764,6 +975,7 @@ async function receiveInbound(event) {
         external_message_id: `demo-message-${suffix}`,
         contact_id: $("#inbound-contact").value.trim(),
         content: $("#inbound-content").value.trim(),
+        group_id: $("#inbound-group").value,
       }),
     });
     $("#inbound-dialog").close();
@@ -808,6 +1020,9 @@ function logout() {
 
 function boot() {
   renderSessionBadge();
+  $("#nav-team").hidden = state.actor?.role === "ATENDENTE";
+  $("#outbox-button").hidden = state.actor?.role === "ATENDENTE";
+  $("#new-group-button").hidden = state.actor?.role !== "ADMIN";
   loadGroups();
   loadBoard();
   loadQuickReplies();
@@ -855,7 +1070,12 @@ function connectRealtime() {
     handleRealtimeEvent(event.data);
     refreshSelected().catch(() => loadBoard());
   };
-  socket.onclose = () => {
+  socket.onclose = (event) => {
+    if (event.code === 1008) {
+      clearSession();
+      location.reload();
+      return;
+    }
     $("#connection").textContent = "reconectando";
     $("#connection").className = "connection offline";
     if (state.token) setTimeout(connectRealtime, 1500);
@@ -902,6 +1122,30 @@ for (const id of ["#search", "#attendance-tag-filter", "#owner-filter", "#status
 $("#profile-stage").addEventListener("change", (event) => updateContactStage(event.target.value));
 $("#nav-attendances").addEventListener("click", () => switchView("attendances"));
 $("#nav-contacts").addEventListener("click", () => switchView("contacts"));
+$("#nav-team").addEventListener("click", () => switchView("team"));
+$("#new-agent-button").addEventListener("click", () => openAgentDialog());
+$("#agent-form").addEventListener("submit", saveAgent);
+$("#close-agent-dialog").addEventListener("click", () => $("#agent-dialog").close());
+$("#new-group-button").addEventListener("click", () => openGroupDialog());
+$("#group-form").addEventListener("submit", saveGroup);
+$("#close-group-dialog").addEventListener("click", () => $("#group-dialog").close());
+$("#membership-form").addEventListener("submit", saveMembership);
+$("#close-membership-dialog").addEventListener("click", () => $("#membership-dialog").close());
+$("#transfer-group").addEventListener("change", populateTransferAgents);
+$("#transfer-form").addEventListener("submit", transferSelected);
+$("#close-transfer-dialog").addEventListener("click", () => $("#transfer-dialog").close());
+$("#agents-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-edit-agent]");
+  if (button) openAgentDialog(button.dataset.editAgent);
+});
+$("#groups-list").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.dataset.editGroup) openGroupDialog(button.dataset.editGroup);
+  if (button.dataset.linkGroup) openMembershipDialog(button.dataset.linkGroup);
+  if (button.dataset.editMembership) openMembershipDialog(button.dataset.editMembership, button.dataset.agentId);
+  if (button.dataset.unlinkGroup) unlinkMembership(button.dataset.unlinkGroup, button.dataset.agentId);
+});
 for (const id of ["#contacts-search", "#contacts-tag-filter", "#contacts-sort"]) {
   $(id).addEventListener(id === "#contacts-search" ? "input" : "change", renderContactsBoard);
 }

@@ -11,6 +11,7 @@ META_VERIFY_TOKEN=<valor privado definido por nós>
 META_APP_SECRET=<App Secret do aplicativo Meta>
 META_ACCESS_TOKEN=<token do system user com acesso ao WhatsApp>
 META_PHONE_NUMBER_ID=<ID do número no WhatsApp Business>
+META_DEFAULT_GROUP_ID=<ID do grupo de atendimento que recebe novas mensagens>
 META_GRAPH_VERSION=v23.0
 ```
 

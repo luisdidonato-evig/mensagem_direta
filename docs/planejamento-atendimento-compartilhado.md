@@ -353,7 +353,7 @@ Definir metas somente após coletar uma linha de base; evitar usar uma meta arbi
 
 - Núcleo, fila central, autenticação, auditoria, métricas, respostas rápidas e grupos têm implementação local.
 - WebSocket exige token e filtra eventos por empresa/grupo; consultas de contatos e métricas seguem o mesmo escopo operacional.
-- Grupos, capacidade e distribuição por chamada (`pull`) existem na API. Painel permite filtrar por grupo e puxar próximo atendimento; cadastro, associação de agentes e capacidade ainda precisam de interface administrativa.
+- Grupos, capacidade e distribuição por chamada (`pull`) existem na API. O painel permite filtrar por grupo, puxar próximo atendimento, gerenciar usuários e vínculos, editar a capacidade e transferir entre grupos.
 - A integração Meta ainda processa o webhook dentro da requisição e a outbox no processo da API. Antes do piloto real: worker durável, reconciliação de envio incerto, alertas, homologação ponta a ponta e política de retenção.
 - Empresa adicional não deve ser ativada antes de separar contatos, credenciais e processamento por empresa.
 
