@@ -27,6 +27,7 @@
             <button id="logout-button" class="text-button" type="button">Sair</button>
           </div>
           <button id="refresh-button" class="button ghost" type="button"><span class="refresh-icon">↻</span> Atualizar</button>
+          <button id="pull-button" class="button ghost" type="button" hidden>↓ Puxar próximo</button>
           <button id="outbox-button" class="button ghost" type="button">⚠ Falhas de envio</button>
           <button id="new-message-button" class="button primary" type="button">＋ Novo atendimento</button>
         </div>
@@ -38,6 +39,7 @@
             <label class="search-field"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="search" type="search" placeholder="Buscar contato ou protocolo" /></label>
             <span class="filter-spacer"></span>
             <label class="select-filter"><span>Tags</span><select id="attendance-tag-filter"><option value="">Todas</option></select></label>
+            <label class="select-filter"><span>Grupo</span><select id="group-filter"><option value="">Todos</option></select></label>
             <label class="select-filter"><span>Responsável</span><select id="owner-filter"><option value="all">Todos</option><option value="mine">Comigo</option><option value="unassigned">Sem responsável</option></select></label>
             <label class="select-filter"><span>Status</span><select id="status-filter"><option value="all">Todos</option><option value="open">Somente abertos</option><option value="closed">Encerrados</option></select></label>
             <label class="select-filter"><span>Ordenação</span><select id="sort-filter"><option value="recent">Mais recentes</option><option value="oldest">Mais antigos</option><option value="contact">Contato A–Z</option></select></label>
@@ -120,12 +122,13 @@
 
     <dialog id="compose-dialog" class="modal">
       <form id="compose-form">
-        <header><div><h2>Mensagem para <span id="compose-contact">contato</span></h2><p>Digite a mensagem que será enviada.</p></div><button type="button" id="close-compose-dialog" class="icon-button">×</button></header>
+        <header><div><h2>Mensagem para <span id="compose-contact">contato</span></h2><p>Envie texto, imagem ou PDF.</p></div><button type="button" id="close-compose-dialog" class="icon-button">×</button></header>
         <div class="quick-replies-row">
           <div id="quick-replies-list" class="quick-replies-list"></div>
           <button id="manage-quick-replies" class="text-button" type="button">⚙ Gerenciar respostas rápidas</button>
         </div>
-        <label>Mensagem<textarea id="message-content" rows="6" required placeholder="Digite a mensagem"></textarea></label>
+        <label>Mensagem ou legenda<textarea id="message-content" rows="6" placeholder="Digite a mensagem"></textarea></label>
+        <label>Anexo opcional<input id="message-file" type="file" accept="image/jpeg,image/png,application/pdf" /><small>Imagem até 5 MB; PDF até 16 MB.</small></label>
         <button class="button primary full" type="submit">Enviar mensagem</button>
       </form>
     </dialog>

@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain import (
@@ -13,6 +13,7 @@ from app.domain import (
     DeliveryStatus,
     EventType,
     MessageDirection,
+    SenderType,
 )
 
 
@@ -28,11 +29,48 @@ class Base(DeclarativeBase):
     pass
 
 
+class Company(Base):
+    __tablename__ = "companies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(160))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc
+    )
+
+
+class ServiceGroup(Base):
+    __tablename__ = "service_groups"
+    __table_args__ = (UniqueConstraint("company_id", "name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str] = mapped_column(
+        ForeignKey("companies.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    max_load_per_agent: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc
+    )
+
+
 class Attendance(Base):
     __tablename__ = "attendances"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     contact_id: Mapped[str] = mapped_column(String(120), index=True)
+    company_id: Mapped[str | None] = mapped_column(
+        ForeignKey("companies.id"), nullable=True, index=True
+    )
+    group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("service_groups.id"), nullable=True, index=True
+    )
+    load_weight: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
     queue_id: Mapped[str] = mapped_column(String(80), default="central", index=True)
     team_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     status: Mapped[AttendanceStatus] = mapped_column(
@@ -100,19 +138,44 @@ class Agent(Base):
     __tablename__ = "agents"
 
     id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    company_id: Mapped[str | None] = mapped_column(
+        ForeignKey("companies.id"), nullable=True, index=True
+    )
     role: Mapped[ActorRole] = mapped_column(Enum(ActorRole, native_enum=False))
     password_hash: Mapped[str] = mapped_column(String(120))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class GroupAgent(Base):
+    __tablename__ = "group_agents"
+
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("service_groups.id"), primary_key=True
+    )
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), primary_key=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    max_load_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc
+    )
+
+
 class QuickReply(Base):
     __tablename__ = "quick_replies"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    company_id: Mapped[str | None] = mapped_column(
+        ForeignKey("companies.id"), nullable=True, index=True
+    )
+    group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("service_groups.id"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(80))
     content: Mapped[str] = mapped_column(Text)
     created_by: Mapped[str] = mapped_column(String(120))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
@@ -142,6 +205,10 @@ class Message(Base):
     direction: Mapped[MessageDirection] = mapped_column(
         Enum(MessageDirection, native_enum=False)
     )
+    sender_type: Mapped[SenderType] = mapped_column(
+        Enum(SenderType, native_enum=False), default=SenderType.SISTEMA, nullable=False
+    )
+    actor_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     content: Mapped[str] = mapped_column(Text)
     delivery_status: Mapped[DeliveryStatus] = mapped_column(
         Enum(DeliveryStatus, native_enum=False)
@@ -149,6 +216,26 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     attendance: Mapped[Attendance] = relationship(back_populates="messages")
+    attachment: Mapped["MediaAttachment | None"] = relationship(
+        back_populates="message", uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class MediaAttachment(Base):
+    __tablename__ = "media_attachments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("messages.id"), unique=True, nullable=False, index=True
+    )
+    storage_key: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    filename: Mapped[str] = mapped_column(String(120), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    external_media_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    message: Mapped[Message] = relationship(back_populates="attachment")
 
 
 class AttendanceEvent(Base):
@@ -221,3 +308,46 @@ class OutboxMessage(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AnalyticsOutbox(Base):
+    __tablename__ = "analytics_outbox"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    topic: Mapped[str] = mapped_column(String(120), index=True)
+    attendance_id: Mapped[str] = mapped_column(
+        ForeignKey("attendances.id"), index=True
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ConversationInsight(Base):
+    __tablename__ = "conversation_insights"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    attendance_id: Mapped[str] = mapped_column(
+        ForeignKey("attendances.id"), unique=True, index=True
+    )
+    company_id: Mapped[str | None] = mapped_column(
+        ForeignKey("companies.id"), nullable=True, index=True
+    )
+    group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("service_groups.id"), nullable=True, index=True
+    )
+    final_assignee_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_response_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    transfer_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    message_count_client: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    message_count_human: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    message_count_ai: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    message_count_bot: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    closure_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    contact_stage: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)

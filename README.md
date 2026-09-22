@@ -10,13 +10,19 @@ Primeira fatia vertical do atendimento compartilhado: fila central, entrada simu
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev]"
+.\.venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
 ## Execução
 
 ```powershell
-.venv\Scripts\uvicorn app.main:app --reload
+.\.venv\Scripts\uvicorn app.main:app --reload
+```
+
+Se criar `.env`, inicie com `--env-file .env`; o app lê variáveis do processo e não carrega esse arquivo sozinho:
+
+```powershell
+.\.venv\Scripts\uvicorn app.main:app --reload --env-file .env
 ```
 
 - API: `http://127.0.0.1:8000`
@@ -27,7 +33,7 @@ python -m venv .venv
 ## Testes
 
 ```powershell
-.venv\Scripts\pytest
+.\.venv\Scripts\pytest
 ```
 
 ## Fluxo mínimo
@@ -94,10 +100,11 @@ O endpoint `GET` responde ao desafio de verificação. O `POST` aceita mensagens
 ## Limites atuais
 
 - Autenticação é JWT local emitido por esta API (login com id+senha), sem MFA/SSO — ver seção "Autenticação". Integração com IdP corporativo (OIDC) fica para quando a EVIG definir esse provedor para esta aplicação.
-- WebSocket (`/api/v1/ws`) não valida o token — qualquer conexão recebe todos os eventos, sem filtro por papel/fila. Autenticar o WebSocket é trabalho futuro.
+- WebSocket (`/api/v1/ws`) exige uma primeira mensagem JSON `{ "token": "..." }` e filtra eventos por empresa/grupo. A conexão usa o token da sessão do painel.
 - WebSocket está em memória; usar Redis/pub-sub antes de múltiplas instâncias.
 - SQLite serve ao desenvolvimento; usar PostgreSQL em produção.
 - Worker atual roda no processo da API; usar fila/worker dedicado antes de escalar horizontalmente.
-- Mídia (imagem/PDF — já decidido como requisito, ver seção 13 do planejamento), templates e tratamento assíncrono do webhook ainda não foram implementados.
-- A Graph API não oferece idempotência equivalente para envio de texto; uma falha após aceite remoto e antes da confirmação local pode exigir reconciliação para evitar duplicação.
-- Escopo por fila/equipe entra junto com ilhas e RBAC definitivo.
+- Mídia JPEG/PNG (até 5 MB) e PDF (até 16 MB) usa `MEDIA_STORAGE_DIR` privado (padrão: `media` ao lado do banco SQLite). O painel envia anexo e baixa arquivo com autenticação. Homologação com a conta Meta, templates e tratamento assíncrono do webhook ainda faltam.
+- Status da Meta com `biz_opaque_callback_data` reconcilia envio cujo retorno local se perdeu. Sem esse callback, a Graph API não oferece idempotência equivalente; uma retentativa ainda pode duplicar a resposta.
+- Grupos, associação de agentes, capacidade e distribuição por chamada já existem na API. Painel filtra por grupo e permite ao atendente puxar o próximo; administração de grupos/agentes ainda é via API.
+- O piloto prevê uma única empresa. Antes de ativar empresas adicionais, separar dados de contato, credenciais Meta e jobs por empresa.

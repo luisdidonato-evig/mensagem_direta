@@ -275,7 +275,7 @@ Possíveis evoluções:
 
 ### P1 — piloto
 
-- anexos prioritários (pendente — decidido como requisito na seção 13, implementação ainda não iniciada);
+- ✅ anexos prioritários (JPEG, PNG e PDF em armazenamento privado, com envio/recebimento pela Meta; homologação real pendente);
 - ✅ busca por contato e protocolo;
 - ✅ tags do atendimento (motivo de encerramento já existia via `ClosureReason`);
 - ✅ respostas rápidas;
@@ -339,15 +339,23 @@ Definir metas somente após coletar uma linha de base; evitar usar uma meta arbi
 1. **Abertura/reabertura:** mantém o comportamento atual do código. Mensagem sem atendimento ativo abre um atendimento novo; atendimento `ENCERRADO` nunca reabre sozinho — não existe janela de tempo de reabertura automática.
 2. **Atendimentos simultâneos por atendente:** sem limite por enquanto. Definir meta só depois de coletar linha de base no piloto (seção 11).
 3. **Supervisor sem assumir:** mantém como hoje — `SUPERVISOR`/`ADMIN` podem enviar mensagem sem `claim`, fica registrado via `actor_id` no evento. Nenhum campo extra de “intervenção”.
-4. **Mídia no MVP:** entram imagem e documento (PDF). Passa a ser item de escopo ativo, fora dos backlog P1 abaixo — ver observação no fim desta seção.
+4. **Mídia no MVP:** entram JPEG, PNG e documento PDF. Fluxo local, painel e adaptador Meta implementados em 2026-09-22; homologação com número real e processamento assíncrono do webhook ainda pendentes.
 5. **Templates/janela de 24h da Meta:** não entram no piloto. Só texto livre dentro da janela padrão; fora da janela, mensagem falha e fica visível como falha, sem reabertura automática via template.
-6. **Multi-organização:** uma única operação (EVIG), sem isolamento multi-tenant. Não existe `organization_id` no schema e não entra agora.
+6. **Multi-organização:** piloto segue com uma única operação (EVIG). `company_id` foi introduzido como chave de escopo para grupos e agentes, mas habilitar outras organizações exige isolar também os dados de contato, credenciais Meta e jobs de integração. Multi-tenant não está pronto para produção.
 7. **Definição de “ilha”:** combinação de equipe e assunto/departamento.
 8. **Dados do cliente no painel:** só os que já existem — nome, telefone, tags, notas internas. Sem integração com CRM externo por enquanto.
 9. **Retenção/auditoria:** sem política formal ainda; mantém tudo indefinidamente em ambiente de desenvolvimento. Vira pendência obrigatória antes de operar com dado real de titular em produção.
 10. **Volume esperado:** desconhecido — medir no piloto antes de fixar meta (segue a mesma lógica da seção 11).
 
-**Observação sobre a decisão 4:** ao contrário das demais, essa decisão expande escopo (mídia estava fora do MVP). Fica registrado aqui que passou a ser requisito ativo; a implementação (upload, storage, envio/recebimento via Graph API, UI de anexo) ainda precisa ser planejada e priorizada separadamente do backlog P1 da seção 9.
+**Observação sobre a decisão 4:** mídia passou a requisito ativo. Upload e download autenticados, armazenamento privado local, envio/recebimento via Graph API e acesso pelo painel já existem. Falta homologar limites e formatos com a conta Meta da operação, levar recebimento para worker durável e definir retenção.
+
+## 13.1 Estado de execução (2026-09-22)
+
+- Núcleo, fila central, autenticação, auditoria, métricas, respostas rápidas e grupos têm implementação local.
+- WebSocket exige token e filtra eventos por empresa/grupo; consultas de contatos e métricas seguem o mesmo escopo operacional.
+- Grupos, capacidade e distribuição por chamada (`pull`) existem na API. Painel permite filtrar por grupo e puxar próximo atendimento; cadastro, associação de agentes e capacidade ainda precisam de interface administrativa.
+- A integração Meta ainda processa o webhook dentro da requisição e a outbox no processo da API. Antes do piloto real: worker durável, reconciliação de envio incerto, alertas, homologação ponta a ponta e política de retenção.
+- Empresa adicional não deve ser ativada antes de separar contatos, credenciais e processamento por empresa.
 
 ## 14. Primeira entrega sugerida
 

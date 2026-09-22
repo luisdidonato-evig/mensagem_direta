@@ -4,6 +4,7 @@ import hmac
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol
 
 import httpx
@@ -12,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.domain import DeliveryStatus
 from app.models import Message, OutboxMessage
+from app.media import media_path
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ class MetaCloudApiSender:
     graph_version: str = "v23.0"
     timeout_seconds: float = 10.0
     transport: httpx.AsyncBaseTransport | None = None
+    media_storage_dir: Path | None = None
 
     async def send(self, payload: dict, idempotency_key: str) -> str | None:
         headers = {
@@ -51,13 +54,39 @@ class MetaCloudApiSender:
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
             "to": payload["contact_id"],
-            "type": "text",
-            "text": {"preview_url": False, "body": payload["content"]},
             "biz_opaque_callback_data": idempotency_key,
         }
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds, transport=self.transport
         ) as client:
+            media = payload.get("media")
+            if media:
+                if self.media_storage_dir is None:
+                    raise RuntimeError("Armazenamento de mídia não configurado")
+                path = media_path(self.media_storage_dir, media["storage_key"])
+                with path.open("rb") as file:
+                    uploaded = await client.post(
+                        f"https://graph.facebook.com/{self.graph_version}/"
+                        f"{self.phone_number_id}/media",
+                        headers={"Authorization": headers["Authorization"]},
+                        data={"messaging_product": "whatsapp"},
+                        files={"file": (media["filename"], file, media["mime_type"])},
+                    )
+                uploaded.raise_for_status()
+                media_id = uploaded.json()["id"]
+                kind = "document" if media["mime_type"] == "application/pdf" else "image"
+                media_body = {"id": media_id}
+                if kind == "document":
+                    media_body["filename"] = media["filename"]
+                if media.get("caption"):
+                    media_body["caption"] = media["caption"]
+                meta_payload["type"] = kind
+                meta_payload[kind] = media_body
+            else:
+                meta_payload["type"] = "text"
+                meta_payload["text"] = {
+                    "preview_url": False, "body": payload["content"]
+                }
             response = await client.post(
                 f"https://graph.facebook.com/{self.graph_version}/"
                 f"{self.phone_number_id}/messages",

@@ -22,6 +22,7 @@ const state = {
   attendances: [],
   contacts: [],
   contactsLoaded: false,
+  groups: [],
   quickReplies: [],
   selectedId: null,
   selected: null,
@@ -65,9 +66,10 @@ function clearSession() {
 }
 
 async function api(path, options = {}) {
+  const contentHeaders = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...identity(), ...(options.headers || {}) },
+    headers: { ...contentHeaders, ...identity(), ...(options.headers || {}) },
   });
   if (response.status === 401 && path !== "/api/v1/auth/login") {
     clearSession();
@@ -151,9 +153,24 @@ function populateAttendanceTagFilter() {
   select.value = current;
 }
 
+async function loadGroups() {
+  try {
+    state.groups = await api(state.actor?.role === "ATENDENTE" ? "/api/v1/me/groups" : "/api/v1/groups");
+    const select = $("#group-filter");
+    const current = select.value;
+    select.innerHTML = '<option value="">Todos</option>' + state.groups
+      .filter((group) => group.active)
+      .map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`)
+      .join("");
+    select.value = current;
+    $("#pull-button").hidden = state.actor?.role !== "ATENDENTE";
+  } catch (error) { toast(error.message); }
+}
+
 function filteredAttendances() {
   const search = $("#search").value.trim().toLocaleLowerCase("pt-BR");
   const tag = $("#attendance-tag-filter").value;
+  const groupId = $("#group-filter").value;
   const owner = $("#owner-filter").value;
   const status = $("#status-filter").value;
   const sort = $("#sort-filter").value;
@@ -163,6 +180,7 @@ function filteredAttendances() {
     const searchable = `${item.contact_display_name || ""} ${item.contact_id} ${item.contact_phone || ""} ${item.id} ${protocolOf(item)}`.toLocaleLowerCase("pt-BR");
     if (search && !searchable.includes(search)) return false;
     if (tag && !(item.tags || []).includes(tag)) return false;
+    if (groupId && item.group_id !== groupId) return false;
     if (owner === "mine" && item.assignee_id !== actorId) return false;
     if (owner === "unassigned" && item.assignee_id) return false;
     if (status === "open" && item.status === "ENCERRADO") return false;
@@ -402,7 +420,7 @@ function renderDetail() {
   $("#profile-owner").textContent = item.assignee_id || "Não atribuído";
   $("#profile-queue").textContent = item.queue_id;
   $("#profile-team").textContent = item.team_id || "Não definida";
-  $("#profile-group").textContent = `Fila ${item.queue_id}`;
+  $("#profile-group").textContent = state.groups.find((group) => group.id === item.group_id)?.name || item.queue_id;
   $("#profile-stage").value = contact.stage || "NAO_CLASSIFICADO";
   $("#compose-contact").textContent = item.contact_id;
   $("#profile-tags").innerHTML = contact.tags.length
@@ -417,7 +435,9 @@ function renderDetail() {
     return `
     <article class="message ${out ? "out" : "in"}">
       <span class="message-row">
-        <div class="message-bubble">${escapeHtml(message.content)}</div>
+        <div class="message-bubble">${escapeHtml(message.content)}${message.attachment
+          ? `<button class="text-button attachment-link" type="button" data-attachment-id="${escapeHtml(message.attachment.id)}" data-filename="${escapeHtml(message.attachment.filename)}">📎 ${escapeHtml(message.attachment.filename)}</button>`
+          : ""}</div>
         ${out ? '<span class="sender-dot" title="Enviado por atendente humano" aria-hidden="true">👤</span>' : ""}
       </span>
       <small class="message-meta">${formatDate(message.created_at)} · ${out ? escapeHtml(message.delivery_status) : "Recebida"}</small>
@@ -425,6 +445,9 @@ function renderDetail() {
   `;
   }).join("") : '<div class="empty">Sem mensagens</div>';
   $("#timeline").scrollTop = $("#timeline").scrollHeight;
+  $("#timeline").querySelectorAll("[data-attachment-id]").forEach((button) => {
+    button.addEventListener("click", () => downloadAttachment(button.dataset.attachmentId, button.dataset.filename));
+  });
 
   const actions = [];
   if (item.status === "AGUARDANDO" && !item.assignee_id) actions.push('<button class="button primary" data-action="claim">Assumir atendimento</button>');
@@ -436,7 +459,7 @@ function renderDetail() {
   if (["AGUARDANDO_CLIENTE", "AGUARDANDO_INTERNO"].includes(item.status)) actions.push(actionButton("Retomar atendimento", "EM_ATENDIMENTO"));
   $("#detail-actions").innerHTML = actions.join("") || '<small>Sem ações disponíveis</small>';
 
-  const canSend = item.status !== "ENCERRADO" && Boolean(item.assignee_id);
+  const canSend = item.status !== "ENCERRADO" && (Boolean(item.assignee_id) || ["SUPERVISOR", "ADMIN"].includes(state.actor?.role));
   $("#open-composer").hidden = !canSend;
   $("[data-action='claim']")?.addEventListener("click", claimSelected);
   $("[data-action='close']")?.addEventListener("click", () => $("#closure-dialog").showModal());
@@ -694,16 +717,39 @@ async function closeAttendance(event) {
 async function sendMessage(event) {
   event.preventDefault();
   const content = $("#message-content").value.trim();
-  if (!content) return;
+  const file = $("#message-file").files[0];
+  if (!content && !file) return;
   try {
-    await api(`/api/v1/attendances/${state.selectedId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ content, client_message_id: crypto.randomUUID() }),
-    });
+    if (file) {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("client_message_id", crypto.randomUUID());
+      form.append("caption", content);
+      await api(`/api/v1/attendances/${state.selectedId}/attachments`, { method: "POST", body: form });
+    } else {
+      await api(`/api/v1/attendances/${state.selectedId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ content, client_message_id: crypto.randomUUID() }),
+      });
+    }
     $("#message-content").value = "";
+    $("#message-file").value = "";
     $("#compose-dialog").close();
     await refreshSelected();
     toast("Mensagem registrada para envio");
+  } catch (error) { toast(error.message); }
+}
+
+async function downloadAttachment(id, filename) {
+  try {
+    const response = await fetch(`/api/v1/attachments/${encodeURIComponent(id)}`, { headers: identity() });
+    if (!response.ok) throw new Error("Anexo indisponível");
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename || "anexo";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   } catch (error) { toast(error.message); }
 }
 
@@ -762,10 +808,30 @@ function logout() {
 
 function boot() {
   renderSessionBadge();
+  loadGroups();
   loadBoard();
   loadQuickReplies();
   requestNotificationPermission();
   connectRealtime();
+}
+
+async function pullNext() {
+  const groupId = $("#group-filter").value || (state.groups.length === 1 ? state.groups[0].id : null);
+  if (!groupId) { toast("Selecione um grupo para puxar atendimento"); return; }
+  try {
+    const response = await fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/attendances/pull`, {
+      method: "POST", headers: identity(),
+    });
+    if (response.status === 204) { toast("Fila vazia"); return; }
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    const attendance = await response.json();
+    await loadBoard();
+    await openDetail(attendance.id);
+    toast("Atendimento atribuído");
+  } catch (error) { toast(error.message); }
 }
 
 let toastTimer;
@@ -780,7 +846,11 @@ function toast(message) {
 function connectRealtime() {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${location.host}/api/v1/ws`);
-  socket.onopen = () => { $("#connection").textContent = "tempo real"; $("#connection").className = "connection online"; };
+  socket.onopen = () => {
+    socket.send(JSON.stringify({ token: state.token }));
+    $("#connection").textContent = "tempo real";
+    $("#connection").className = "connection online";
+  };
   socket.onmessage = (event) => {
     handleRealtimeEvent(event.data);
     refreshSelected().catch(() => loadBoard());
@@ -788,7 +858,7 @@ function connectRealtime() {
   socket.onclose = () => {
     $("#connection").textContent = "reconectando";
     $("#connection").className = "connection offline";
-    setTimeout(connectRealtime, 1500);
+    if (state.token) setTimeout(connectRealtime, 1500);
   };
 }
 
@@ -803,6 +873,8 @@ $("#close-note-dialog").addEventListener("click", () => $("#note-dialog").close(
 $("#closure-form").addEventListener("submit", closeAttendance);
 $("#close-closure-dialog").addEventListener("click", () => $("#closure-dialog").close());
 $("#compose-form").addEventListener("submit", sendMessage);
+$("#pull-button").addEventListener("click", pullNext);
+$("#group-filter").addEventListener("change", renderBoard);
 $("#open-composer").addEventListener("click", () => { renderQuickReplyChips(); $("#compose-dialog").showModal(); });
 $("#close-compose-dialog").addEventListener("click", () => $("#compose-dialog").close());
 $("#edit-attendance-tags").addEventListener("click", openAttendanceTagsEditor);

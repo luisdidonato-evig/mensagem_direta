@@ -1,24 +1,74 @@
 from fastapi import WebSocket
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain import ActorRole
+from app.models import Agent, Attendance, GroupAgent, Message, OutboxMessage
+from app.schemas import Actor
 
 
 class ConnectionManager:
-    def __init__(self) -> None:
-        self._connections: set[WebSocket] = set()
+    def __init__(self, session_factory: sessionmaker) -> None:
+        self.session_factory = session_factory
+        self._connections: dict[WebSocket, Actor] = {}
 
-    async def connect(self, websocket: WebSocket) -> None:
-        await websocket.accept()
-        self._connections.add(websocket)
+    def connect(self, websocket: WebSocket, actor: Actor) -> None:
+        self._connections[websocket] = actor
 
     def disconnect(self, websocket: WebSocket) -> None:
-        self._connections.discard(websocket)
+        self._connections.pop(websocket, None)
+
+    @staticmethod
+    def _attendance_scope(actor: Actor):
+        query = select(Attendance.id).where(Attendance.company_id == actor.company_id)
+        if actor.role == ActorRole.ATENDENTE:
+            groups = select(GroupAgent.group_id).where(
+                GroupAgent.agent_id == actor.id, GroupAgent.active.is_(True)
+            )
+            query = query.where(Attendance.group_id.in_(groups))
+        return query
+
+    def _can_receive(self, session: Session, actor: Actor, event: dict) -> bool:
+        agent = session.get(Agent, actor.id)
+        if agent is None or not agent.active or agent.company_id != actor.company_id or agent.role != actor.role:
+            return False
+
+        attendance = event.get("attendance") or {}
+        attendance_id = attendance.get("id") or event.get("attendance_id")
+        if attendance_id:
+            return session.scalar(
+                self._attendance_scope(actor).where(Attendance.id == attendance_id).limit(1)
+            ) is not None
+
+        contact_id = event.get("contact_id")
+        if contact_id:
+            return session.scalar(
+                self._attendance_scope(actor)
+                .where(Attendance.contact_id == contact_id)
+                .limit(1)
+            ) is not None
+
+        outbox_id = event.get("outbox_id")
+        if outbox_id and actor.role in {ActorRole.SUPERVISOR, ActorRole.ADMIN}:
+            return session.scalar(
+                self._attendance_scope(actor)
+                .join(Message, Message.attendance_id == Attendance.id)
+                .join(OutboxMessage, OutboxMessage.message_id == Message.id)
+                .where(OutboxMessage.id == outbox_id)
+                .limit(1)
+            ) is not None
+        return False
 
     async def publish(self, event: dict) -> None:
         stale: list[WebSocket] = []
-        for connection in tuple(self._connections):
-            try:
-                await connection.send_json(event)
-            except Exception:
-                stale.append(connection)
+        with self.session_factory() as session:
+            for connection, actor in tuple(self._connections.items()):
+                if not self._can_receive(session, actor, event):
+                    continue
+                try:
+                    await connection.send_json(event)
+                except Exception:
+                    stale.append(connection)
         for connection in stale:
             self.disconnect(connection)
 

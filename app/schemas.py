@@ -9,12 +9,14 @@ from app.domain import (
     DeliveryStatus,
     EventType,
     MessageDirection,
+    SenderType,
 )
 
 
 class Actor(BaseModel):
     id: str
     role: ActorRole
+    company_id: str
 
 
 class LoginRequest(BaseModel):
@@ -35,13 +37,58 @@ class AgentCreate(BaseModel):
     password: str = Field(min_length=8, max_length=200)
 
 
+class AgentUpdate(BaseModel):
+    role: ActorRole | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=200)
+    active: bool | None = None
+
+
 class AgentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    company_id: str
     role: ActorRole
     active: bool
     created_at: datetime
+
+
+class GroupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    max_load_per_agent: int = Field(default=5, ge=1)
+
+
+class GroupUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    max_load_per_agent: int | None = Field(default=None, ge=1)
+    active: bool | None = None
+
+
+class GroupRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    company_id: str
+    name: str
+    active: bool
+    max_load_per_agent: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class GroupAgentUpdate(BaseModel):
+    max_load_override: int | None = Field(default=None, ge=1)
+
+
+class GroupAgentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    group_id: str
+    agent_id: str
+    active: bool
+    max_load_override: int | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ContactUpdate(BaseModel):
@@ -72,6 +119,10 @@ class InboundMessageCreate(BaseModel):
     external_message_id: str = Field(min_length=1, max_length=160)
     contact_id: str = Field(min_length=1, max_length=120)
     content: str = Field(min_length=1, max_length=10_000)
+    company_id: str | None = None
+    group_id: str | None = None
+    load_weight: int = Field(default=1, ge=1)
+    priority: int = Field(default=0, ge=0)
 
 
 class ClaimRequest(BaseModel):
@@ -79,8 +130,15 @@ class ClaimRequest(BaseModel):
 
 
 class TransferRequest(BaseModel):
-    target_actor_id: str = Field(min_length=1, max_length=120)
+    target_actor_id: str | None = Field(default=None, min_length=1, max_length=120)
+    target_group_id: str | None = Field(default=None, min_length=1, max_length=36)
     expected_version: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def check_target(self) -> "TransferRequest":
+        if self.target_actor_id is None and self.target_group_id is None:
+            raise ValueError("Informe target_actor_id ou target_group_id")
+        return self
 
 
 class StatusChangeRequest(BaseModel):
@@ -105,6 +163,15 @@ class OutboundMessageCreate(BaseModel):
     client_message_id: str = Field(min_length=1, max_length=160)
 
 
+class MediaAttachmentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    mime_type: str
+    filename: str
+    size_bytes: int
+
+
 class MessageRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -113,9 +180,12 @@ class MessageRead(BaseModel):
     external_id: str | None
     client_message_id: str | None
     direction: MessageDirection
+    sender_type: SenderType
+    actor_id: str | None
     content: str
     delivery_status: DeliveryStatus
     created_at: datetime
+    attachment: MediaAttachmentRead | None = None
 
 
 class EventRead(BaseModel):
@@ -159,6 +229,10 @@ class AttendanceRead(BaseModel):
 
     id: str
     contact_id: str
+    company_id: str | None
+    group_id: str | None
+    load_weight: int
+    priority: int
     queue_id: str
     team_id: str | None
     status: AttendanceStatus
@@ -177,15 +251,30 @@ class AttendanceTagsUpdate(BaseModel):
 class QuickReplyCreate(BaseModel):
     title: str = Field(min_length=1, max_length=80)
     content: str = Field(min_length=1, max_length=2_000)
+    group_id: str | None = Field(default=None, max_length=36)
 
 
 class QuickReplyRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    company_id: str | None
+    group_id: str | None
     title: str
     content: str
     created_by: str
+    active: bool
+    created_at: datetime
+
+
+class TimelineItem(BaseModel):
+    id: str
+    kind: str
+    attendance_id: str
+    actor_id: str | None
+    sender_type: SenderType | None = None
+    content: str | None = None
+    details: dict = Field(default_factory=dict)
     created_at: datetime
 
 

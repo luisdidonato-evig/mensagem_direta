@@ -18,8 +18,10 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(actor_id: str, role: str, secret: str) -> tuple[str, datetime]:
+def create_access_token(
+    actor_id: str, role: str, company_id: str, secret: str
+) -> tuple[str, datetime]:
     expires_at = datetime.now(timezone.utc) + ACCESS_TOKEN_TTL
-    payload = {"sub": actor_id, "role": role, "exp": expires_at}
+    payload = {"sub": actor_id, "role": role, "company_id": company_id, "exp": expires_at}
     token = jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
     return token, expires_at

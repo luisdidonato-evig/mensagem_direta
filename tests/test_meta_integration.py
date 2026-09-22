@@ -241,6 +241,51 @@ def test_outbox_delivery_and_meta_status_callback(tmp_path):
         assert outbound["delivery_status"] == DeliveryStatus.LIDA
 
 
+def test_meta_callback_reconciles_uncertain_send(tmp_path):
+    app = create_app(
+        f"sqlite:///{(tmp_path / 'uncertain.db').as_posix()}",
+        meta_app_secret=APP_SECRET,
+    )
+    with TestClient(app) as client:
+        attendance_id = prepare_outbound(client)
+        with app.state.database.session_factory() as session:
+            outbox_id = session.scalar(select(OutboxMessage.id))
+        callback = status_webhook("wamid.uncertain.1", "delivered")
+        callback["entry"][0]["changes"][0]["value"]["statuses"][0][
+            "biz_opaque_callback_data"
+        ] = outbox_id
+        assert post_meta(client, callback).status_code == 200
+        with app.state.database.session_factory() as session:
+            outbox = session.get(OutboxMessage, outbox_id)
+            assert outbox.processed_at is not None
+        detail = client.get(
+            f"/api/v1/attendances/{attendance_id}",
+            headers=login_headers(client, "agente-1"),
+        ).json()
+        outbound = [m for m in detail["messages"] if m["direction"] == "SAIDA"][0]
+        assert outbound["external_id"] == "wamid.uncertain.1"
+        assert outbound["delivery_status"] == "ENTREGUE"
+
+
+def test_meta_failed_status_is_visible_for_assisted_retry(tmp_path):
+    app = create_app(
+        f"sqlite:///{(tmp_path / 'meta-failed.db').as_posix()}",
+        meta_app_secret=APP_SECRET,
+    )
+    with TestClient(app) as client:
+        prepare_outbound(client)
+        processor = OutboxProcessor(app.state.database.session_factory, SuccessfulSender())
+        assert asyncio.run(processor.process_batch()) == (1, 0)
+        assert post_meta(client, status_webhook("wamid.out.1", "failed")).status_code == 200
+        failed = client.get(
+            "/api/v1/integrations/outbox",
+            headers=login_headers(client, "supervisor-1"),
+        ).json()
+        assert len(failed) == 1
+        assert failed[0]["delivery_status"] == "FALHA"
+        assert failed[0]["attempts"] == 5
+
+
 def test_outbox_marks_message_failed_after_limit(tmp_path):
     app = create_app(
         f"sqlite:///{(tmp_path / 'failure.db').as_posix()}",

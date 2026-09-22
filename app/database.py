@@ -24,7 +24,8 @@ class Database:
         )
 
     def create_schema(self) -> None:
-        Base.metadata.create_all(self.engine)
+        if self.engine.url.drivername.startswith("sqlite"):
+            Base.metadata.create_all(self.engine)
 
     def close(self) -> None:
         self.engine.dispose()

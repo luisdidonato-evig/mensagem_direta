@@ -1,6 +1,6 @@
 from conftest import login_headers
 
-from app.main import DEV_SEED_PASSWORD
+from app.main import DEV_COMPANY_ID, DEV_SEED_PASSWORD
 
 
 def test_login_succeeds_with_valid_credentials(client):
@@ -12,7 +12,11 @@ def test_login_succeeds_with_valid_credentials(client):
     body = response.json()
     assert body["access_token"]
     assert body["token_type"] == "bearer"
-    assert body["actor"] == {"id": "agente-1", "role": "ATENDENTE"}
+    assert body["actor"] == {
+        "id": "agente-1",
+        "role": "ATENDENTE",
+        "company_id": DEV_COMPANY_ID,
+    }
 
 
 def test_login_fails_with_wrong_password(client):
@@ -85,3 +89,15 @@ def test_duplicate_agent_id_conflicts(client):
     )
 
     assert response.status_code == 409
+
+
+def test_deactivated_agent_token_stops_working(client):
+    agent_headers = login_headers(client, "agente-1")
+    admin_headers = login_headers(client, "admin-1")
+    deactivated = client.patch(
+        "/api/v1/agents/agente-1",
+        json={"active": False},
+        headers=admin_headers,
+    )
+    assert deactivated.status_code == 200
+    assert client.get("/api/v1/attendances", headers=agent_headers).status_code == 401

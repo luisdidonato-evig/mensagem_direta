@@ -21,6 +21,14 @@ class MessageDirection(str, Enum):
     SAIDA = "SAIDA"
 
 
+class SenderType(str, Enum):
+    CLIENTE = "CLIENTE"
+    ATENDENTE = "ATENDENTE"
+    IA = "IA"
+    BOT = "BOT"
+    SISTEMA = "SISTEMA"
+
+
 class DeliveryStatus(str, Enum):
     RECEBIDA = "RECEBIDA"
     PENDENTE = "PENDENTE"
