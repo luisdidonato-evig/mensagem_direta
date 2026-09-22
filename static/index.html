@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Central de atendimento</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar" aria-label="Navegação principal">
+      <div class="logo" aria-label="EVIG Atendimento">E</div>
+      <nav>
+        <button class="nav-item" title="Início" aria-label="Início"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19.5z"/><path d="M9 21v-7h6v7"/></svg></button>
+        <button id="nav-attendances" class="nav-item active" title="Atendimentos" aria-label="Atendimentos"><svg viewBox="0 0 24 24"><path d="M5 18.5A3.5 3.5 0 0 1 1.5 15V8A3.5 3.5 0 0 1 5 4.5h14A3.5 3.5 0 0 1 22.5 8v7a3.5 3.5 0 0 1-3.5 3.5H9L4 22v-3.5z"/></svg></button>
+        <button id="nav-contacts" class="nav-item" title="Contatos" aria-label="Contatos"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3.5 19v-1.5A4.5 4.5 0 0 1 8 13h2a4.5 4.5 0 0 1 4.5 4.5V19"/><path d="M16 5.5a3 3 0 0 1 0 5.8M16.5 14a4 4 0 0 1 4 4v1"/></svg></button>
+        <button class="nav-item" title="Relatórios" aria-label="Relatórios"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20V7"/></svg></button>
+      </nav>
+      <div class="sidebar-bottom"><span class="avatar small">AG</span><small>v0.1</small></div>
+    </aside>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div><h1 id="page-title">Atendimentos</h1><p id="page-subtitle">Acompanhe e responda conversas em um só lugar.</p></div>
+        <div class="top-actions">
+          <div class="identity">
+            <span id="session-actor" class="session-actor">—</span>
+            <button id="logout-button" class="text-button" type="button">Sair</button>
+          </div>
+          <button id="refresh-button" class="button ghost" type="button"><span class="refresh-icon">↻</span> Atualizar</button>
+          <button id="outbox-button" class="button ghost" type="button">⚠ Falhas de envio</button>
+          <button id="new-message-button" class="button primary" type="button">＋ Novo atendimento</button>
+        </div>
+      </header>
+
+      <main>
+        <div id="attendances-view">
+          <section class="filterbar" aria-label="Filtros">
+            <label class="search-field"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="search" type="search" placeholder="Buscar contato ou protocolo" /></label>
+            <span class="filter-spacer"></span>
+            <label class="select-filter"><span>Tags</span><select id="attendance-tag-filter"><option value="">Todas</option></select></label>
+            <label class="select-filter"><span>Responsável</span><select id="owner-filter"><option value="all">Todos</option><option value="mine">Comigo</option><option value="unassigned">Sem responsável</option></select></label>
+            <label class="select-filter"><span>Status</span><select id="status-filter"><option value="all">Todos</option><option value="open">Somente abertos</option><option value="closed">Encerrados</option></select></label>
+            <label class="select-filter"><span>Ordenação</span><select id="sort-filter"><option value="recent">Mais recentes</option><option value="oldest">Mais antigos</option><option value="contact">Contato A–Z</option></select></label>
+            <span id="connection" class="connection offline">offline</span>
+          </section>
+          <section class="metrics-strip" aria-label="Resumo operacional">
+            <div><span id="metric-open">0</span><small>abertos</small></div>
+            <div><span id="metric-unassigned">0</span><small>sem responsável</small></div>
+            <div><span id="metric-mine">0</span><small>comigo</small></div>
+            <div><span id="metric-first-response">—</span><small>1ª resposta média</small></div>
+            <div><span id="metric-resolution">—</span><small>resolução média</small></div>
+            <div><span id="metric-closed">0</span><small>encerrados hoje</small></div>
+          </section>
+          <section id="board" class="board" aria-label="Atendimentos por status"></section>
+        </div>
+
+        <div id="contacts-view" hidden>
+          <section class="filterbar" aria-label="Filtros de contatos">
+            <label class="search-field"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="contacts-search" type="search" placeholder="Buscar contato" /></label>
+            <span class="filter-spacer"></span>
+            <label class="select-filter"><span>Tags</span><select id="contacts-tag-filter"><option value="">Todas</option></select></label>
+            <label class="select-filter"><span>Ordenação</span><select id="contacts-sort"><option value="recent">Mais recentes</option><option value="oldest">Mais antigos</option><option value="contact">Contato A–Z</option></select></label>
+          </section>
+          <section id="contacts-board" class="board" aria-label="Contatos por estágio"></section>
+        </div>
+      </main>
+    </div>
+
+    <div id="backdrop" class="backdrop"></div>
+    <aside id="detail-panel" class="detail-panel" aria-hidden="true">
+      <section class="conversation-pane">
+        <header class="conversation-head">
+          <div class="contact-summary"><span id="detail-avatar" class="avatar">--</span><div><h2 id="detail-contact">Contato</h2><span id="detail-status" class="status-pill"></span><span id="detail-stale" class="stale-pill" hidden>⏰ Parado</span></div></div>
+          <div class="conversation-meta"><small>Última interação</small><strong id="detail-updated">—</strong></div>
+        </header>
+        <div class="attendance-tags-row">
+          <div id="attendance-tags" class="tag-list"><span class="empty-tag">Sem tags do atendimento</span></div>
+          <button id="edit-attendance-tags" class="text-button" type="button">✎ Tags</button>
+        </div>
+        <div id="detail-actions" class="detail-actions"></div>
+        <div id="timeline" class="timeline"></div>
+        <footer class="conversation-footer"><button id="open-composer" class="button primary full" type="button">↪ Enviar nova mensagem</button></footer>
+      </section>
+      <section class="contact-pane">
+        <header><h2>Contato</h2><div class="contact-head-actions"><button id="edit-contact" class="text-button" type="button">✎ Editar</button><button id="close-detail" class="icon-button" aria-label="Fechar">×</button></div></header>
+        <div class="contact-profile"><span id="profile-avatar" class="avatar large">--</span><div><strong id="profile-name">Contato</strong><span id="profile-id">—</span><span id="profile-phone">Telefone não informado</span></div></div>
+        <section class="info-section">
+          <h3>Informações do atendimento</h3>
+          <dl><div><dt>Protocolo</dt><dd id="profile-protocol">—</dd></div><div><dt>Responsável</dt><dd id="profile-owner">—</dd></div><div><dt>Fila</dt><dd id="profile-queue">—</dd></div><div><dt>Equipe</dt><dd id="profile-team">Não definida</dd></div></dl>
+        </section>
+        <section class="info-section">
+          <h3>Organização</h3>
+          <label class="readonly-field">Grupo<span id="profile-group">Fila central</span></label>
+          <label class="stage-field">Estágio do contato
+            <select id="profile-stage">
+              <option value="NAO_CLASSIFICADO">Não classificado</option>
+              <option value="NOVO_CONTATO">Novo contato</option>
+              <option value="CLIENTE_POTENCIAL">Cliente em potencial</option>
+              <option value="CLIENTE_ATIVO">Cliente ativo</option>
+              <option value="INATIVO">Inativo</option>
+            </select>
+          </label>
+          <div class="tags-block"><small>Tags</small><div id="profile-tags" class="tag-list"><span class="empty-tag">Sem tags</span></div></div>
+        </section>
+        <section class="info-section notes-section">
+          <div class="section-title"><h3>Notas internas</h3><button id="add-note" class="text-button" type="button">＋ Adicionar</button></div>
+          <div id="profile-notes" class="notes-list"><span class="empty-note">Nenhuma nota</span></div>
+        </section>
+      </section>
+    </aside>
+
+    <dialog id="inbound-dialog" class="modal">
+      <form id="inbound-form">
+        <header><div><h2>Novo atendimento</h2><p>Simule uma mensagem recebida pelo WhatsApp.</p></div><button type="button" id="close-inbound-dialog" class="icon-button">×</button></header>
+        <label>Identificador do contato<input id="inbound-contact" value="contato-demo" required /></label>
+        <label>Primeira mensagem<textarea id="inbound-content" rows="5" required placeholder="Digite a mensagem recebida"></textarea></label>
+        <button class="button primary full" type="submit">Criar atendimento</button>
+      </form>
+    </dialog>
+
+    <dialog id="compose-dialog" class="modal">
+      <form id="compose-form">
+        <header><div><h2>Mensagem para <span id="compose-contact">contato</span></h2><p>Digite a mensagem que será enviada.</p></div><button type="button" id="close-compose-dialog" class="icon-button">×</button></header>
+        <div class="quick-replies-row">
+          <div id="quick-replies-list" class="quick-replies-list"></div>
+          <button id="manage-quick-replies" class="text-button" type="button">⚙ Gerenciar respostas rápidas</button>
+        </div>
+        <label>Mensagem<textarea id="message-content" rows="6" required placeholder="Digite a mensagem"></textarea></label>
+        <button class="button primary full" type="submit">Enviar mensagem</button>
+      </form>
+    </dialog>
+
+    <dialog id="attendance-tags-dialog" class="modal">
+      <form id="attendance-tags-form">
+        <header><div><h2>Tags do atendimento</h2><p>Visíveis pra toda a equipe, usadas pra classificar e filtrar.</p></div><button type="button" id="close-attendance-tags-dialog" class="icon-button">×</button></header>
+        <label>Tags<input id="attendance-tags-input" placeholder="urgente, financeiro, reclamação" /><small>Separe tags por vírgula.</small></label>
+        <button class="button primary full" type="submit">Salvar tags</button>
+      </form>
+    </dialog>
+
+    <dialog id="quick-reply-dialog" class="modal">
+      <header><div><h2>Respostas rápidas</h2><p>Supervisão gerencia; qualquer atendente pode usar.</p></div><button type="button" id="close-quick-reply-dialog" class="icon-button">×</button></header>
+      <div id="quick-reply-manage-list" class="quick-reply-manage-list"></div>
+      <form id="quick-reply-form">
+        <label>Título<input id="quick-reply-title" maxlength="80" placeholder="Ex: Saudação inicial" required /></label>
+        <label>Conteúdo<textarea id="quick-reply-content" rows="4" maxlength="2000" placeholder="Texto que será inserido" required></textarea></label>
+        <button class="button primary full" type="submit">Adicionar resposta rápida</button>
+      </form>
+    </dialog>
+
+    <dialog id="outbox-dialog" class="modal outbox-modal">
+      <header><div><h2>Falhas de envio</h2><p>Itens que ainda não foram entregues à Meta.</p></div><button type="button" id="close-outbox-dialog" class="icon-button">×</button></header>
+      <div class="outbox-toolbar"><button id="process-outbox" class="button ghost" type="button">↻ Processar agora</button></div>
+      <div id="outbox-list" class="outbox-list"></div>
+    </dialog>
+
+    <dialog id="contact-dialog" class="modal">
+      <form id="contact-form">
+        <header><div><h2>Editar contato</h2><p>Dados visíveis para equipe de atendimento.</p></div><button type="button" id="close-contact-dialog" class="icon-button">×</button></header>
+        <label>Nome completo<input id="contact-name" maxlength="160" placeholder="Nome do contato" /></label>
+        <label>Telefone<input id="contact-phone" maxlength="32" placeholder="+55 00 00000-0000" /></label>
+        <label>Tags<input id="contact-tags" placeholder="cliente, prioridade, retorno" /><small>Separe tags por vírgula.</small></label>
+        <button class="button primary full" type="submit">Salvar contato</button>
+      </form>
+    </dialog>
+
+    <dialog id="note-dialog" class="modal">
+      <form id="note-form">
+        <header><div><h2>Nova nota interna</h2><p>Visível somente para equipe de atendimento.</p></div><button type="button" id="close-note-dialog" class="icon-button">×</button></header>
+        <label>Nota<textarea id="note-content" rows="5" maxlength="5000" required placeholder="Registre contexto útil para equipe"></textarea></label>
+        <button class="button primary full" type="submit">Adicionar nota</button>
+      </form>
+    </dialog>
+
+    <dialog id="closure-dialog" class="modal">
+      <form id="closure-form">
+        <header><div><h2>Encerrar atendimento</h2><p>Informe motivo para manter indicadores confiáveis.</p></div><button type="button" id="close-closure-dialog" class="icon-button">×</button></header>
+        <label>Motivo<select id="closure-reason" required><option value="RESOLVIDO">Resolvido</option><option value="SEM_RETORNO">Sem retorno</option><option value="DUPLICADO">Duplicado</option><option value="FORA_ESCOPO">Fora do escopo</option><option value="OUTRO">Outro</option></select></label>
+        <label>Observação opcional<textarea id="closure-note" rows="4" maxlength="1000" placeholder="Contexto do encerramento"></textarea></label>
+        <button class="button danger full" type="submit">Confirmar encerramento</button>
+      </form>
+    </dialog>
+
+    <dialog id="login-dialog" class="modal">
+      <form id="login-form">
+        <header><div><h2>Entrar</h2><p>Use as credenciais do seu agente.</p></div></header>
+        <label>Identificador<input id="login-id" autocomplete="username" required /></label>
+        <label>Senha<input id="login-password" type="password" autocomplete="current-password" required /></label>
+        <button class="button primary full" type="submit">Entrar</button>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

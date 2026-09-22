@@ -1,0 +1,10 @@
+bcrypt<5.0,>=4.1
+fastapi<1.0,>=0.116
+httpx<1.0,>=0.28
+pydantic<3.0,>=2.11
+pyjwt<3.0,>=2.9
+sqlalchemy<3.0,>=2.0
+uvicorn[standard]<1.0,>=0.35
+
+[dev]
+pytest<9.0,>=8.4
