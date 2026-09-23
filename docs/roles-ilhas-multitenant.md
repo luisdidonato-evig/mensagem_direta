@@ -28,15 +28,12 @@ Regras obrigatórias: autorização no backend para cada leitura, escrita, WebSo
 
 ## Contrato necessário do sistema central de roles
 
-O sistema de Miguel em PHP/Go deve fornecer identidade e autorização verificáveis ao Mensagem Direta. Contrato mínimo a definir:
-
 1. **Identidade:** `user_id` estável, papel, estado ativo/inativo e emissor confiável. `admin` e `vendedor` precisam de `company_id`; `master` precisa de identidade global e informa empresa alvo nas operações de uma empresa.
 2. **Papéis e permissões:** reconhecer `master` global, `admin` da empresa e `vendedor` vinculado a ilhas. Se o provedor central usar permissões granulares, elas devem preservar essa matriz; confirmar nomes/códigos com ele antes de implementar.
 3. **Validação:** formato do token ou introspecção, assinatura/chaves, audiência, expiração, revogação e sincronização de alterações de papel/estado. Definir quem provisiona a identidade local necessária para atribuição e auditoria.
 4. **Escopo de ilha:** vínculo entre `user_id`, `company_id` e `group_id`, inclusive política para múltiplas ilhas, desativação e vendedor com atendimento ativo. Decidir qual serviço é fonte de verdade desse vínculo; o Mensagem Direta já persiste `group_agents`.
 5. **Erros e eventos:** distinguir autenticação inválida de acesso negado e informar alterações de conta/permissão com latência aceitável para revogar sessões.
 
-O Mensagem Direta deve resolver identidade, papel e escopo em um ponto central de autenticação/autorização do backend, usado pelas rotas e pelo WebSocket. O middleware/dependência aplica `company_id` para `admin`/`vendedor` e permite consulta global para `master`; operações sobre recurso de uma empresa continuam identificando a empresa alvo. Funções de domínio validam papel e vínculo de ilha na operação concreta. Eventos externos, workers e webhooks não usam role humana: identificam a empresa pelo canal/credencial confiável.
 
 ## Migração do estado local
 
