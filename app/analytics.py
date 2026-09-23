@@ -59,13 +59,16 @@ def _build_insight(session: Session, attendance: Attendance) -> ConversationInsi
             )
         )
     )
-    contact = session.get(Contact, attendance.contact_id)
+    contact = session.scalar(select(Contact).where(
+        Contact.company_id == attendance.company_id,
+        Contact.external_id == attendance.contact_id,
+    ))
 
     first_inbound = next(
         (m for m in messages if m.direction == MessageDirection.ENTRADA), None
     )
     first_outbound = next(
-        (m for m in messages if m.direction == MessageDirection.SAIDA), None
+        (m for m in messages if m.direction == MessageDirection.SAIDA and m.sender_type == SenderType.ATENDENTE), None
     )
     first_response_seconds = None
     if first_inbound is not None and first_outbound is not None:

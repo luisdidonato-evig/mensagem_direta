@@ -46,6 +46,7 @@ class EventType(str, Enum):
     ASSUMIDO = "ASSUMIDO"
     STATUS_ALTERADO = "STATUS_ALTERADO"
     TRANSFERIDO = "TRANSFERIDO"
+    AVALIADO = "AVALIADO"
 
 
 class ClosureReason(str, Enum):

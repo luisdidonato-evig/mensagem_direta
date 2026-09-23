@@ -56,11 +56,17 @@ class AgentRead(BaseModel):
 class GroupCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     max_load_per_agent: int = Field(default=5, ge=1)
+    max_active_attendances: int | None = Field(default=None, ge=1)
+    load_cost_per_attendance: int = Field(default=1, ge=1)
+    queue_wait_message: str = Field(default="Você entrou na fila de espera para ser atendido.", min_length=1, max_length=2000)
 
 
 class GroupUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     max_load_per_agent: int | None = Field(default=None, ge=1)
+    max_active_attendances: int | None = Field(default=None, ge=1)
+    load_cost_per_attendance: int | None = Field(default=None, ge=1)
+    queue_wait_message: str | None = Field(default=None, min_length=1, max_length=2000)
     active: bool | None = None
 
 
@@ -72,6 +78,9 @@ class GroupRead(BaseModel):
     name: str
     active: bool
     max_load_per_agent: int
+    max_active_attendances: int
+    load_cost_per_attendance: int
+    queue_wait_message: str
     created_at: datetime
     updated_at: datetime
 
@@ -161,6 +170,21 @@ class StatusChangeRequest(BaseModel):
 class OutboundMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=10_000)
     client_message_id: str = Field(min_length=1, max_length=160)
+    buttons: list["ReplyButton"] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def unique_buttons(self) -> "OutboundMessageCreate":
+        ids = [button.id for button in self.buttons]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Identificadores de botões devem ser únicos")
+        if self.buttons and len(self.content) > 1024:
+            raise ValueError("Mensagem com botões aceita até 1024 caracteres")
+        return self
+
+
+class ReplyButton(BaseModel):
+    id: str = Field(min_length=1, max_length=256)
+    title: str = Field(min_length=1, max_length=20)
 
 
 class MediaAttachmentRead(BaseModel):
@@ -186,6 +210,7 @@ class MessageRead(BaseModel):
     delivery_status: DeliveryStatus
     created_at: datetime
     attachment: MediaAttachmentRead | None = None
+    buttons: list[ReplyButton] = Field(default_factory=list)
 
 
 class EventRead(BaseModel):
@@ -242,6 +267,14 @@ class AttendanceRead(BaseModel):
     updated_at: datetime
     tags: list[str] = Field(default_factory=list)
     stale: bool = False
+    rating: "AttendanceRatingRead | None" = None
+
+
+class AttendanceRatingRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    score: int = Field(ge=1, le=5)
+    created_at: datetime
 
 
 class AttendanceTagsUpdate(BaseModel):
@@ -251,6 +284,12 @@ class AttendanceTagsUpdate(BaseModel):
 class QuickReplyCreate(BaseModel):
     title: str = Field(min_length=1, max_length=80)
     content: str = Field(min_length=1, max_length=2_000)
+    group_id: str | None = Field(default=None, max_length=36)
+
+
+class QuickReplyUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=80)
+    content: str | None = Field(default=None, min_length=1, max_length=2_000)
     group_id: str | None = Field(default=None, max_length=36)
 
 
@@ -311,6 +350,8 @@ class MetricsSummary(BaseModel):
     closed_today: int
     average_first_response_seconds: float | None
     average_resolution_seconds: float | None
+    average_rating: float | None
+    ratings_count: int
 
 
 class InboundResult(BaseModel):

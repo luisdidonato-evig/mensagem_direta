@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.domain import (
@@ -52,6 +52,9 @@ class ServiceGroup(Base):
     name: Mapped[str] = mapped_column(String(120))
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     max_load_per_agent: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    max_active_attendances: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    load_cost_per_attendance: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    queue_wait_message: Mapped[str] = mapped_column(Text, default="Você entrou na fila de espera para ser atendido.", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, onupdate=now_utc
@@ -97,12 +100,18 @@ class Attendance(Base):
     closure: Mapped["AttendanceClosure"] = relationship(
         back_populates="attendance", cascade="all, delete-orphan", uselist=False
     )
+    rating: Mapped["AttendanceRating | None"] = relationship(
+        back_populates="attendance", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class Contact(Base):
     __tablename__ = "contacts"
+    __table_args__ = (UniqueConstraint("company_id", "external_id"),)
 
     id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     display_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
     stage: Mapped[ContactStage] = mapped_column(
@@ -184,6 +193,7 @@ class ContactAuditEvent(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     contact_id: Mapped[str] = mapped_column(String(120), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), nullable=False, index=True)
     actor_id: Mapped[str] = mapped_column(String(120), index=True)
     changed_fields: Mapped[list[str]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
@@ -210,6 +220,8 @@ class Message(Base):
     )
     actor_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     content: Mapped[str] = mapped_column(Text)
+    buttons: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list, nullable=False)
+    interaction_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
     delivery_status: Mapped[DeliveryStatus] = mapped_column(
         Enum(DeliveryStatus, native_enum=False)
     )
@@ -287,6 +299,20 @@ class AttendanceClosure(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
     attendance: Mapped[Attendance] = relationship(back_populates="closure")
+
+
+class AttendanceRating(Base):
+    __tablename__ = "attendance_ratings"
+    __table_args__ = (CheckConstraint("score >= 1 AND score <= 5", name="rating_score_range"),)
+
+    attendance_id: Mapped[str] = mapped_column(
+        ForeignKey("attendances.id"), primary_key=True
+    )
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    attendance: Mapped[Attendance] = relationship(back_populates="rating")
 
 
 class IntegrationEvent(Base):

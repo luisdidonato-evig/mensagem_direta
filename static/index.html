@@ -8,7 +8,7 @@
   </head>
   <body>
     <aside class="sidebar" aria-label="Navegação principal">
-      <div class="logo" aria-label="EVIG Atendimento">E</div>
+      <div id="company-logo" class="logo" aria-label="Centro de atendimento">C</div>
       <nav>
         <button class="nav-item" title="Início" aria-label="Início"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 19.5z"/><path d="M9 21v-7h6v7"/></svg></button>
         <button id="nav-attendances" class="nav-item active" title="Atendimentos" aria-label="Atendimentos"><svg viewBox="0 0 24 24"><path d="M5 18.5A3.5 3.5 0 0 1 1.5 15V8A3.5 3.5 0 0 1 5 4.5h14A3.5 3.5 0 0 1 22.5 8v7a3.5 3.5 0 0 1-3.5 3.5H9L4 22v-3.5z"/></svg></button>
@@ -53,6 +53,7 @@
             <div><span id="metric-first-response">—</span><small>1ª resposta média</small></div>
             <div><span id="metric-resolution">—</span><small>resolução média</small></div>
             <div><span id="metric-closed">0</span><small>encerrados hoje</small></div>
+            <div><span id="metric-rating">—</span><small>avaliação média</small></div>
           </section>
           <section id="board" class="board" aria-label="Atendimentos por status"></section>
         </div>
@@ -73,7 +74,7 @@
             <div id="agents-list" class="management-list"></div>
           </section>
           <section class="management-panel">
-            <header class="management-head"><div><h2>Grupos de atendimento</h2><p>Vínculos e capacidade da equipe</p></div><button id="new-group-button" class="button primary" type="button" hidden>＋ Grupo</button></header>
+            <header class="management-head"><div><h2>Grupos de atendimento</h2><p>Vínculos, carga total e fila de espera</p></div><button id="new-group-button" class="button primary" type="button" hidden>＋ Grupo</button></header>
             <div id="groups-list" class="management-list"></div>
           </section>
         </div>
@@ -105,6 +106,7 @@
         <section class="info-section">
           <h3>Organização</h3>
           <label class="readonly-field">Grupo<span id="profile-group">Fila central</span></label>
+          <label class="readonly-field">Avaliação do cliente<span id="profile-rating">Ainda não avaliado</span></label>
           <label class="stage-field">Estágio do contato
             <select id="profile-stage">
               <option value="NAO_CLASSIFICADO">Não classificado</option>
@@ -146,9 +148,11 @@
 
     <dialog id="group-dialog" class="modal">
       <form id="group-form">
-        <header><div><h2 id="group-dialog-title">Novo grupo</h2><p>Defina a fila e a capacidade por atendente.</p></div><button type="button" id="close-group-dialog" class="icon-button">×</button></header>
+        <header><div><h2 id="group-dialog-title">Novo grupo</h2><p>Defina carga da ilha e mensagem de espera.</p></div><button type="button" id="close-group-dialog" class="icon-button">×</button></header>
         <label>Nome<input id="group-name" maxlength="120" required /></label>
-        <label>Capacidade por atendente<input id="group-capacity" type="number" min="1" required /></label>
+        <label>Capacidade total da ilha (unidades de carga)<input id="group-capacity" type="number" min="1" required /><small>Exemplo: capacidade 5 e custo 1 permitem 5 atendimentos ativos.</small></label>
+        <label>Custo de carga por atendimento ativo<input id="group-load-cost" type="number" min="1" step="1" required /><small>Unidades consumidas por conversa com responsável.</small></label>
+        <label>Mensagem de fila de espera<textarea id="group-wait-message" maxlength="2000" required></textarea><small>Enviada ao cliente quando a ilha estiver sem capacidade.</small></label>
         <label id="group-active-label" class="check-field"><input id="group-active" type="checkbox" checked /> Grupo ativo</label>
         <button class="button primary full" type="submit">Salvar grupo</button>
       </form>
@@ -158,7 +162,7 @@
       <form id="membership-form">
         <header><div><h2 id="membership-dialog-title">Vincular usuário</h2><p>Atendentes recebem atendimentos dos grupos aos quais pertencem.</p></div><button type="button" id="close-membership-dialog" class="icon-button">×</button></header>
         <label>Usuário<select id="membership-agent" required></select></label>
-        <label>Capacidade específica<input id="membership-capacity" type="number" min="1" placeholder="Usar capacidade do grupo" /><small>Deixe vazio para usar a capacidade do grupo.</small></label>
+        <label>Limite individual (opcional)<input id="membership-capacity" type="number" min="1" placeholder="Usar limite padrão" /><small>Deixe vazio para usar limite padrão por atendente.</small></label>
         <button class="button primary full" type="submit">Salvar vínculo</button>
       </form>
     </dialog>
@@ -167,7 +171,7 @@
       <form id="transfer-form">
         <header><div><h2>Transferir atendimento</h2><p>Escolha um grupo e, se desejar, um responsável.</p></div><button type="button" id="close-transfer-dialog" class="icon-button">×</button></header>
         <label>Grupo de destino<select id="transfer-group" required></select></label>
-        <label>Responsável<select id="transfer-agent"><option value="">Fila do grupo, sem responsável</option></select></label>
+        <label id="transfer-agent-field">Responsável<select id="transfer-agent"><option value="">Fila do grupo, sem responsável</option></select></label>
         <button class="button primary full" type="submit">Transferir</button>
       </form>
     </dialog>
@@ -181,6 +185,7 @@
         </div>
         <label>Mensagem ou legenda<textarea id="message-content" rows="6" placeholder="Digite a mensagem"></textarea></label>
         <label>Anexo opcional<input id="message-file" type="file" accept="image/jpeg,image/png,application/pdf" /><small>Imagem até 5 MB; PDF até 16 MB.</small></label>
+        <label>Botões de resposta opcionais<input id="message-buttons" maxlength="100" placeholder="Sim, Não, Falar com atendente" /><small>Até 3 títulos separados por vírgula, máximo 20 caracteres cada. Disponível só para texto.</small></label>
         <button class="button primary full" type="submit">Enviar mensagem</button>
       </form>
     </dialog>
@@ -197,9 +202,11 @@
       <header><div><h2>Respostas rápidas</h2><p>Supervisão gerencia; qualquer atendente pode usar.</p></div><button type="button" id="close-quick-reply-dialog" class="icon-button">×</button></header>
       <div id="quick-reply-manage-list" class="quick-reply-manage-list"></div>
       <form id="quick-reply-form">
+        <label>Disponível para<select id="quick-reply-group"><option value="">Todos os grupos</option></select></label>
         <label>Título<input id="quick-reply-title" maxlength="80" placeholder="Ex: Saudação inicial" required /></label>
         <label>Conteúdo<textarea id="quick-reply-content" rows="4" maxlength="2000" placeholder="Texto que será inserido" required></textarea></label>
-        <button class="button primary full" type="submit">Adicionar resposta rápida</button>
+        <button id="save-quick-reply" class="button primary full" type="submit">Adicionar resposta rápida</button>
+        <button id="cancel-quick-reply-edit" class="button ghost full" type="button" hidden>Cancelar edição</button>
       </form>
     </dialog>
 

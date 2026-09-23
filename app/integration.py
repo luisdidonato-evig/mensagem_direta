@@ -37,6 +37,20 @@ class MessageSender(Protocol):
 
 
 @dataclass
+class TenantMetaSender:
+    senders: dict[str, "MetaCloudApiSender"]
+    fallback: "MetaCloudApiSender | None" = None
+
+    async def send(self, payload: dict, idempotency_key: str) -> str | None:
+        sender = self.senders.get(payload.get("company_id", ""))
+        if sender is None and not payload.get("company_id"):
+            sender = self.fallback
+        if sender is None:
+            raise RuntimeError("Credenciais Meta não configuradas para empresa")
+        return await sender.send(payload, idempotency_key)
+
+
+@dataclass
 class MetaCloudApiSender:
     phone_number_id: str
     access_token: str
@@ -82,6 +96,29 @@ class MetaCloudApiSender:
                     media_body["caption"] = media["caption"]
                 meta_payload["type"] = kind
                 meta_payload[kind] = media_body
+            elif payload.get("buttons"):
+                meta_payload["type"] = "interactive"
+                meta_payload["interactive"] = {
+                    "type": "button",
+                    "body": {"text": payload["content"]},
+                    "action": {"buttons": [
+                        {"type": "reply", "reply": button}
+                        for button in payload["buttons"]
+                    ]},
+                }
+            elif payload.get("list_options"):
+                meta_payload["type"] = "interactive"
+                meta_payload["interactive"] = {
+                    "type": "list",
+                    "body": {"text": payload["content"]},
+                    "action": {
+                        "button": "Dar nota",
+                        "sections": [{"title": "Avaliação", "rows": [
+                            {"id": option["id"], "title": option["title"]}
+                            for option in payload["list_options"]
+                        ]}],
+                    },
+                }
             else:
                 meta_payload["type"] = "text"
                 meta_payload["text"] = {

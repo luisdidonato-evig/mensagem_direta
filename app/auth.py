@@ -5,7 +5,7 @@ from fastapi import Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.domain import ActorRole
-from app.models import Agent
+from app.models import Agent, Company
 from app.schemas import Actor
 from app.security import JWT_ALGORITHM
 
@@ -31,6 +31,9 @@ def authenticate_token(token: str, secret: str, session: Session) -> Actor:
     agent = session.get(Agent, actor_id)
     if agent is None or not agent.active or agent.company_id != company_id or agent.role != role:
         raise HTTPException(status_code=401, detail="Conta ou permissões alteradas")
+    company = session.get(Company, company_id)
+    if company is None or not company.active:
+        raise HTTPException(status_code=401, detail="Empresa inativa")
     return Actor(id=actor_id, role=role, company_id=company_id)
 
 

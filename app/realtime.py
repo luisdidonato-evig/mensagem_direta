@@ -29,11 +29,20 @@ class ConnectionManager:
         return query
 
     def _can_receive(self, session: Session, actor: Actor, event: dict) -> bool:
+        if event.get("company_id") and event["company_id"] != actor.company_id:
+            return False
         agent = session.get(Agent, actor.id)
         if agent is None or not agent.active or agent.company_id != actor.company_id or agent.role != actor.role:
             return False
 
         attendance = event.get("attendance") or {}
+        if attendance.get("company_id") and attendance["company_id"] != actor.company_id:
+            return False
+        previous_group_id = event.get("previous_group_id")
+        if previous_group_id and actor.role == ActorRole.ATENDENTE:
+            link = session.get(GroupAgent, (previous_group_id, actor.id))
+            if link is not None and link.active:
+                return True
         attendance_id = attendance.get("id") or event.get("attendance_id")
         if attendance_id:
             return session.scalar(

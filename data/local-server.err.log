@@ -1,0 +1,9 @@
+JWT_SECRET não configurado — usando segredo efêmero gerado em memória; tokens ficam inválidos a cada reinício. Defina JWT_SECRET antes de produção.
+INFO:     Started server process [23260]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:56141 - "WebSocket /api/v1/ws" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:58048 - "WebSocket /api/v1/ws" [accepted]
+INFO:     connection open

@@ -33,9 +33,11 @@ from app.models import (
     Agent,
     Attendance,
     AttendanceClosure,
+    AttendanceRating,
     AttendanceEvent,
     AttendanceTag,
     Contact,
+    Company,
     ContactAuditEvent,
     ContactTag,
     GroupAgent,
@@ -46,6 +48,7 @@ from app.models import (
     OutboxMessage,
     QuickReply,
     ServiceGroup,
+    new_id,
     now_utc,
 )
 from app.schemas import (
@@ -77,6 +80,7 @@ from app.schemas import (
     OutboxItemRead,
     QuickReplyCreate,
     QuickReplyRead,
+    QuickReplyUpdate,
     StatusChangeRequest,
     TimelineItem,
     TokenResponse,
@@ -94,6 +98,9 @@ def login(payload: LoginRequest, request: Request, session: SessionDep) -> dict:
     agent = session.get(Agent, payload.id)
     if agent is None or not agent.active or not verify_password(payload.password, agent.password_hash):
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
+    company = session.get(Company, agent.company_id)
+    if company is None or not company.active:
+        raise HTTPException(status_code=401, detail="Empresa inativa")
     token, expires_at = create_access_token(
         agent.id, agent.role.value, agent.company_id, request.app.state.jwt_secret
     )
@@ -102,6 +109,14 @@ def login(payload: LoginRequest, request: Request, session: SessionDep) -> dict:
         "expires_at": expires_at,
         "actor": {"id": agent.id, "role": agent.role, "company_id": agent.company_id},
     }
+
+
+@router.get("/me/company")
+def get_my_company(session: SessionDep, actor: ActorDep) -> dict[str, str]:
+    company = session.get(Company, actor.company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="Empresa não encontrada")
+    return {"id": company.id, "name": company.name}
 
 
 @router.post("/agents", response_model=AgentRead, status_code=201)
@@ -188,10 +203,15 @@ def update_agent(
 def create_group(payload: GroupCreate, session: SessionDep, actor: ActorDep) -> ServiceGroup:
     if actor.role != ActorRole.ADMIN:
         raise HTTPException(status_code=403, detail="Apenas administrador cria grupos")
+    if payload.load_cost_per_attendance > (payload.max_active_attendances or payload.max_load_per_agent):
+        raise HTTPException(status_code=422, detail="Custo de carga não pode superar capacidade do grupo")
     group = ServiceGroup(
         company_id=actor.company_id,
         name=payload.name.strip(),
         max_load_per_agent=payload.max_load_per_agent,
+        max_active_attendances=payload.max_active_attendances or payload.max_load_per_agent,
+        load_cost_per_attendance=payload.load_cost_per_attendance,
+        queue_wait_message=payload.queue_wait_message.strip(),
     )
     session.add(group)
     try:
@@ -205,13 +225,20 @@ def create_group(payload: GroupCreate, session: SessionDep, actor: ActorDep) -> 
 
 @router.get("/groups", response_model=list[GroupRead])
 def list_groups(session: SessionDep, actor: ActorDep) -> list[ServiceGroup]:
-    return list(
-        session.scalars(
-            select(ServiceGroup)
-            .where(ServiceGroup.company_id == actor.company_id)
-            .order_by(ServiceGroup.name)
-        )
-    )
+    query = select(ServiceGroup).where(ServiceGroup.company_id == actor.company_id)
+    if actor.role == ActorRole.ATENDENTE:
+        query = query.where(ServiceGroup.id.in_(select(GroupAgent.group_id).where(
+            GroupAgent.agent_id == actor.id, GroupAgent.active.is_(True)
+        )))
+    return list(session.scalars(query.order_by(ServiceGroup.name)))
+
+
+@router.get("/groups/transfer-targets", response_model=list[GroupRead])
+def list_transfer_targets(session: SessionDep, actor: ActorDep) -> list[ServiceGroup]:
+    return list(session.scalars(select(ServiceGroup).where(
+        ServiceGroup.company_id == actor.company_id,
+        ServiceGroup.active.is_(True),
+    ).order_by(ServiceGroup.name)))
 
 
 def load_group(session: Session, actor: Actor, group_id: str) -> ServiceGroup:
@@ -219,6 +246,24 @@ def load_group(session: Session, actor: Actor, group_id: str) -> ServiceGroup:
     if group is None or group.company_id != actor.company_id:
         raise HTTPException(status_code=404, detail="Grupo não encontrado")
     return group
+
+
+def group_active_load(session: Session, group: ServiceGroup) -> int:
+    """Return current load units consumed by assigned conversations."""
+    active_count = int(session.scalar(select(func.count(Attendance.id)).where(
+        Attendance.group_id == group.id,
+        Attendance.assignee_id.is_not(None),
+        Attendance.status.in_(ACTIVE_STATUSES),
+    )) or 0)
+    return active_count * group.load_cost_per_attendance
+
+
+def ensure_group_capacity(session: Session, group: ServiceGroup, attendance: Attendance | None = None) -> None:
+    """Limit concurrent assigned conversation load across the entire group."""
+    if attendance is not None and attendance.group_id == group.id and attendance.assignee_id is not None and attendance.status in ACTIVE_STATUSES:
+        return
+    if group_active_load(session, group) + group.load_cost_per_attendance > group.max_active_attendances:
+        raise HTTPException(status_code=409, detail="Grupo atingiu a capacidade total de carga")
 
 
 @router.patch("/groups/{group_id}", response_model=GroupRead)
@@ -229,10 +274,29 @@ def update_group(
         raise HTTPException(status_code=403, detail="Apenas administrador edita grupos")
     group = load_group(session, actor, group_id)
     if payload.name is not None:
+        if not payload.name.strip():
+            raise HTTPException(status_code=422, detail="Nome do grupo obrigatório")
         group.name = payload.name.strip()
     if payload.max_load_per_agent is not None:
         group.max_load_per_agent = payload.max_load_per_agent
+    if payload.max_active_attendances is not None:
+        group.max_active_attendances = payload.max_active_attendances
+    if payload.load_cost_per_attendance is not None:
+        group.load_cost_per_attendance = payload.load_cost_per_attendance
+    if payload.queue_wait_message is not None:
+        if not payload.queue_wait_message.strip():
+            raise HTTPException(status_code=422, detail="Mensagem de espera obrigatória")
+        group.queue_wait_message = payload.queue_wait_message.strip()
+    if group.load_cost_per_attendance > group.max_active_attendances:
+        raise HTTPException(status_code=422, detail="Custo de carga não pode superar capacidade do grupo")
     if payload.active is not None:
+        if not payload.active and group.active:
+            open_attendance = session.scalar(select(Attendance.id).where(
+                Attendance.group_id == group.id,
+                Attendance.status.in_(ACTIVE_STATUSES),
+            ))
+            if open_attendance is not None:
+                raise HTTPException(status_code=409, detail="Transfira atendimentos abertos antes de desativar o grupo")
         group.active = payload.active
     try:
         session.commit()
@@ -354,6 +418,8 @@ async def pull_attendance(
     group_id: str, request: Request, session: SessionDep, actor: ActorDep
 ) -> Attendance | Response:
     group = load_group(session, actor, group_id)
+    if not group.active:
+        raise HTTPException(status_code=409, detail="Grupo de atendimento inativo")
     link = session.scalar(
         select(GroupAgent)
         .where(
@@ -365,7 +431,8 @@ async def pull_attendance(
     )
     if link is None:
         raise HTTPException(status_code=403, detail="Atendente não pertence ao grupo")
-    capacity = link.max_load_override or group.max_load_per_agent
+    ensure_group_capacity(session, group)
+    capacity = link.max_load_override or group.max_active_attendances
     current_load = int(
         session.scalar(
             select(func.coalesce(func.sum(Attendance.load_weight), 0)).where(
@@ -458,7 +525,13 @@ def ensure_can_operate(attendance: Attendance, actor: Actor) -> None:
 
 
 def ensure_claim_capacity(session: Session, attendance: Attendance, actor: Actor) -> None:
-    if actor.role != ActorRole.ATENDENTE or attendance.group_id is None:
+    if attendance.group_id is None:
+        return
+    group = session.get(ServiceGroup, attendance.group_id)
+    if group is None or not group.active:
+        raise HTTPException(status_code=409, detail="Grupo de atendimento inativo")
+    ensure_group_capacity(session, group, attendance)
+    if actor.role != ActorRole.ATENDENTE:
         return
     link = session.scalar(
         select(GroupAgent)
@@ -471,10 +544,7 @@ def ensure_claim_capacity(session: Session, attendance: Attendance, actor: Actor
     )
     if link is None:
         raise HTTPException(status_code=403, detail="Atendente não pertence ao grupo")
-    group = session.get(ServiceGroup, attendance.group_id)
-    if group is None or not group.active:
-        raise HTTPException(status_code=409, detail="Grupo de atendimento inativo")
-    capacity = link.max_load_override or group.max_load_per_agent
+    capacity = link.max_load_override or group.max_active_attendances
     current_load = int(
         session.scalar(
             select(func.coalesce(func.sum(Attendance.load_weight), 0)).where(
@@ -489,13 +559,21 @@ def ensure_claim_capacity(session: Session, attendance: Attendance, actor: Actor
         raise HTTPException(status_code=409, detail="Atendente atingiu a capacidade")
 
 
-async def broadcast(request: Request, kind: str, attendance: Attendance) -> None:
+async def broadcast(request: Request, kind: str, attendance: Attendance, previous_group_id: str | None = None) -> None:
     await request.app.state.realtime.publish(
         {
             "type": kind,
             "attendance": jsonable_encoder(AttendanceRead.model_validate(attendance)),
+            "previous_group_id": previous_group_id,
         }
     )
+
+
+def find_contact(session: Session, company_id: str, external_id: str) -> Contact | None:
+    return session.scalar(select(Contact).where(
+        Contact.company_id == company_id,
+        Contact.external_id == external_id,
+    ))
 
 
 async def process_inbound_message(
@@ -504,14 +582,6 @@ async def process_inbound_message(
     session: Session,
     media_file: tuple[bytes, str, str] | None = None,
 ) -> InboundResult:
-    processed = session.get(IntegrationEvent, payload.external_event_id)
-    if processed:
-        attendance = load_attendance(session, processed.attendance_id)
-        message = session.get(Message, processed.message_id)
-        if message is None:
-            raise HTTPException(status_code=500, detail="Evento processado sem mensagem")
-        return InboundResult(attendance=attendance, message=message, duplicate=True)
-
     group = session.get(ServiceGroup, payload.group_id) if payload.group_id else None
     if group is None and payload.company_id:
         group = session.scalar(
@@ -534,9 +604,19 @@ async def process_inbound_message(
     if payload.company_id is not None and group.company_id != payload.company_id:
         raise HTTPException(status_code=422, detail="Grupo não pertence à empresa")
 
-    contact = session.get(Contact, payload.contact_id)
+    processed = session.get(IntegrationEvent, payload.external_event_id)
+    if processed:
+        attendance = load_attendance(session, processed.attendance_id)
+        if attendance.company_id != group.company_id:
+            raise HTTPException(status_code=409, detail="Evento externo pertence a outra empresa")
+        message = session.get(Message, processed.message_id)
+        if message is None:
+            raise HTTPException(status_code=500, detail="Evento processado sem mensagem")
+        return InboundResult(attendance=attendance, message=message, duplicate=True)
+
+    contact = find_contact(session, group.company_id, payload.contact_id)
     if contact is None:
-        session.add(Contact(id=payload.contact_id))
+        session.add(Contact(id=new_id(), company_id=group.company_id, external_id=payload.contact_id))
 
     attendance = session.scalar(
         select(Attendance)
@@ -590,6 +670,33 @@ async def process_inbound_message(
     )
     session.add(message)
     session.flush()
+    if created and group_active_load(session, group) + group.load_cost_per_attendance > group.max_active_attendances:
+        waiting_reply = Message(
+            attendance_id=attendance.id,
+            direction=MessageDirection.SAIDA,
+            sender_type=SenderType.BOT,
+            content=group.queue_wait_message,
+            delivery_status=DeliveryStatus.PENDENTE,
+        )
+        session.add(waiting_reply)
+        session.flush()
+        session.add_all([
+            OutboxMessage(
+                message_id=waiting_reply.id,
+                payload={
+                    "message_id": waiting_reply.id,
+                    "attendance_id": attendance.id,
+                    "contact_id": attendance.contact_id,
+                    "content": waiting_reply.content,
+                    "company_id": attendance.company_id,
+                },
+            ),
+            AttendanceEvent(
+                attendance_id=attendance.id,
+                type=EventType.MENSAGEM_ENVIADA,
+                details={"message_id": waiting_reply.id, "reason": "group_capacity_wait"},
+            ),
+        ])
     stored_key = None
     if media_file is not None:
         data, filename, external_media_id = media_file
@@ -629,6 +736,8 @@ async def process_inbound_message(
         if processed is None:
             raise HTTPException(status_code=409, detail="Mensagem externa duplicada") from None
         attendance = load_attendance(session, processed.attendance_id)
+        if attendance.company_id != group.company_id:
+            raise HTTPException(status_code=409, detail="Evento externo pertence a outra empresa")
         message = session.get(Message, processed.message_id)
         if message is None:
             raise HTTPException(status_code=500, detail="Evento processado sem mensagem")
@@ -651,15 +760,22 @@ async def receive_inbound_message(
 
 
 @router.get("/integrations/meta/whatsapp/webhook", response_class=PlainTextResponse)
-async def verify_meta_webhook(request: Request):
+@router.get("/integrations/meta/whatsapp/webhook/{phone_number_id}", response_class=PlainTextResponse)
+async def verify_meta_webhook(request: Request, phone_number_id: str | None = None):
+    if phone_number_id is None and request.app.state.meta_tenants:
+        raise HTTPException(status_code=404, detail="Use webhook da empresa")
+    tenant = request.app.state.meta_tenants.get(phone_number_id) if phone_number_id else None
+    if phone_number_id and tenant is None:
+        raise HTTPException(status_code=404, detail="Número Meta não configurado")
+    expected_token = tenant["verify_token"] if tenant else request.app.state.meta_verify_token
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
     if (
         mode != "subscribe"
         or not challenge
-        or not request.app.state.meta_verify_token
-        or token != request.app.state.meta_verify_token
+        or not expected_token
+        or token != expected_token
     ):
         raise HTTPException(status_code=403, detail="Verificação do webhook inválida")
     return PlainTextResponse(challenge)
@@ -681,7 +797,7 @@ DELIVERY_RANK = {
 }
 
 
-async def process_meta_status(status: dict, request: Request, session: Session) -> bool:
+async def process_meta_status(status: dict, request: Request, session: Session, company_id: str | None = None) -> bool:
     external_id = status.get("id")
     mapped = META_STATUS_MAP.get(status.get("status"))
     if not external_id or mapped is None:
@@ -703,6 +819,11 @@ async def process_meta_status(status: dict, request: Request, session: Session) 
             return False
         message.external_id = external_id
         outbox.processed_at = now_utc()
+    if company_id is not None:
+        attendance = session.get(Attendance, message.attendance_id)
+        if attendance is None or attendance.company_id != company_id:
+            session.rollback()
+            return False
     current_rank = DELIVERY_RANK.get(message.delivery_status, 0)
     next_rank = DELIVERY_RANK[mapped]
     outbox = session.scalar(
@@ -731,17 +852,78 @@ async def process_meta_status(status: dict, request: Request, session: Session) 
     return True
 
 
+async def process_meta_rating(
+    item: dict, reply: dict, request: Request, session: Session, company_id: str | None
+) -> tuple[bool, bool]:
+    parts = (reply.get("id") or "").split(":")
+    if len(parts) != 3 or parts[0] != "rating" or parts[2] not in {"1", "2", "3", "4", "5"}:
+        return False, False
+    attendance = session.get(Attendance, parts[1])
+    if (
+        attendance is None or attendance.status != AttendanceStatus.ENCERRADO
+        or attendance.contact_id != item.get("from")
+        or (company_id is not None and attendance.company_id != company_id)
+    ):
+        return False, False
+    event_id = f"meta-message:{item.get('id')}"
+    if session.get(IntegrationEvent, event_id):
+        return True, True
+    survey = session.scalar(select(Message.id).where(
+        Message.attendance_id == attendance.id,
+        Message.interaction_kind == "list",
+        Message.direction == MessageDirection.SAIDA,
+    ))
+    if survey is None:
+        return False, False
+    if session.get(AttendanceRating, attendance.id):
+        return True, True
+    message = Message(
+        id=new_id(),
+        attendance_id=attendance.id,
+        external_id=item["id"],
+        direction=MessageDirection.ENTRADA,
+        sender_type=SenderType.CLIENTE,
+        content=reply.get("title") or f"Nota {parts[2]}",
+        delivery_status=DeliveryStatus.RECEBIDA,
+    )
+    session.add(message)
+    session.add(AttendanceRating(attendance_id=attendance.id, score=int(parts[2]), message_id=message.id))
+    session.add(AttendanceEvent(
+        attendance_id=attendance.id, type=EventType.AVALIADO,
+        details={"score": int(parts[2]), "message_id": message.id},
+    ))
+    session.add(IntegrationEvent(
+        external_event_id=event_id, attendance_id=attendance.id, message_id=message.id,
+    ))
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        if session.get(AttendanceRating, attendance.id) or session.get(IntegrationEvent, event_id):
+            return True, True
+        raise
+    await broadcast(request, "attendance.rated", attendance)
+    return True, False
+
+
 @router.post("/integrations/meta/whatsapp/webhook")
+@router.post("/integrations/meta/whatsapp/webhook/{phone_number_id}")
 async def receive_meta_webhook(
     request: Request,
     session: SessionDep,
+    phone_number_id: str | None = None,
 ) -> dict:
+    if phone_number_id is None and request.app.state.meta_tenants:
+        raise HTTPException(status_code=404, detail="Use webhook da empresa")
+    tenant = request.app.state.meta_tenants.get(phone_number_id) if phone_number_id else None
+    if phone_number_id and tenant is None:
+        raise HTTPException(status_code=404, detail="Número Meta não configurado")
     body = await request.body()
     try:
         verify_meta_signature(
             body,
             request.headers.get("X-Hub-Signature-256"),
-            request.app.state.meta_app_secret,
+            tenant["app_secret"] if tenant else request.app.state.meta_app_secret,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -755,6 +937,17 @@ async def receive_meta_webhook(
     if not isinstance(payload, dict) or payload.get("object") != "whatsapp_business_account":
         raise HTTPException(status_code=422, detail="Objeto Meta não suportado")
 
+    webhook_company_id = tenant["company_id"] if tenant else None
+    if webhook_company_id is None:
+        default_group = (
+            session.get(ServiceGroup, request.app.state.meta_default_group_id)
+            if request.app.state.meta_default_group_id else None
+        )
+        if default_group is None:
+            groups = list(session.scalars(select(ServiceGroup).where(ServiceGroup.active.is_(True)).limit(2)))
+            default_group = groups[0] if len(groups) == 1 else None
+        webhook_company_id = default_group.company_id if default_group else None
+
     processed = 0
     duplicates = 0
     ignored = 0
@@ -764,6 +957,8 @@ async def receive_meta_webhook(
                 ignored += 1
                 continue
             value = change.get("value") or {}
+            if tenant and (value.get("metadata") or {}).get("phone_number_id") != phone_number_id:
+                raise HTTPException(status_code=422, detail="Número Meta do webhook não corresponde à rota")
             profiles = {
                 item.get("wa_id"): (item.get("profile") or {}).get("name")
                 for item in value.get("contacts", [])
@@ -772,12 +967,31 @@ async def receive_meta_webhook(
                 contact_id = item.get("from")
                 external_id = item.get("id")
                 kind = item.get("type")
-                if kind not in {"text", "image", "document"} or not contact_id or not external_id:
+                if kind not in {"text", "image", "document", "interactive", "button"} or not contact_id or not external_id:
                     ignored += 1
                     continue
                 media_file = None
                 if kind == "text":
                     content = (item.get("text") or {}).get("body")
+                    if not content:
+                        ignored += 1
+                        continue
+                elif kind in {"interactive", "button"}:
+                    if kind == "interactive":
+                        interactive = item.get("interactive") or {}
+                        reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+                        if interactive.get("type") == "list_reply":
+                            rated, duplicate = await process_meta_rating(
+                                item, reply, request, session,
+                                webhook_company_id,
+                            )
+                            if rated:
+                                processed += 1
+                                duplicates += int(duplicate)
+                                continue
+                    else:
+                        reply = item.get("button") or {}
+                    content = reply.get("title") or reply.get("text")
                     if not content:
                         ignored += 1
                         continue
@@ -793,7 +1007,11 @@ async def receive_meta_webhook(
                     content = media_info.get("caption") or filename
                     if session.get(IntegrationEvent, f"meta-message:{external_id}") is None:
                         try:
-                            data = await request.app.state.meta_media_downloader.download(media_id)
+                            downloader = (
+                                request.app.state.meta_media_downloaders[phone_number_id]
+                                if tenant else request.app.state.meta_media_downloader
+                            )
+                            data = await downloader.download(media_id)
                             actual_kind, _ = validate_media(data)
                             if actual_kind != kind:
                                 raise ValueError("Tipo de mídia recebido não corresponde ao webhook")
@@ -808,13 +1026,14 @@ async def receive_meta_webhook(
                         external_message_id=external_id,
                         contact_id=contact_id,
                         content=content,
-                        group_id=request.app.state.meta_default_group_id or None,
+                        company_id=webhook_company_id,
+                        group_id=tenant["group_id"] if tenant else request.app.state.meta_default_group_id or None,
                     ),
                     request,
                     session,
                     media_file,
                 )
-                contact = session.get(Contact, contact_id)
+                contact = find_contact(session, result.attendance.company_id, contact_id)
                 if contact:
                     contact.phone = contact_id
                     contact.display_name = profiles.get(contact_id) or contact.display_name
@@ -822,7 +1041,7 @@ async def receive_meta_webhook(
                 processed += 1
                 duplicates += int(result.duplicate)
             for status in value.get("statuses", []):
-                if await process_meta_status(status, request, session):
+                if await process_meta_status(status, request, session, webhook_company_id):
                     processed += 1
                 else:
                     ignored += 1
@@ -868,20 +1087,18 @@ def latest_attendance_for_contact(
 
 
 def build_contact_read(session: Session, contact_id: str, actor: Actor) -> ContactRead:
-    contact = session.get(Contact, contact_id)
-    tags = list(
-        session.scalars(
-            select(ContactTag.name)
-            .where(ContactTag.contact_id == contact_id)
-            .order_by(ContactTag.name)
-        )
-    )
     last_attendance = latest_attendance_for_contact(session, contact_id, actor)
     if last_attendance is None:
         raise HTTPException(status_code=404, detail="Contato não encontrado")
+    contact = find_contact(session, actor.company_id, contact_id)
     if contact:
+        tags = list(session.scalars(
+            select(ContactTag.name)
+            .where(ContactTag.contact_id == contact.id)
+            .order_by(ContactTag.name)
+        ))
         return ContactRead(
-            id=contact.id,
+            id=contact.external_id,
             display_name=contact.display_name,
             phone=contact.phone,
             tags=tags,
@@ -935,7 +1152,8 @@ def list_contacts(
     search: str | None = None,
 ) -> list[ContactRead]:
     query = select(Contact).where(
-        Contact.id.in_(
+        Contact.company_id == actor.company_id,
+        Contact.external_id.in_(
             select(Attendance.contact_id).where(
                 Attendance.id.in_(visible_attendance_ids(actor))
             )
@@ -952,7 +1170,7 @@ def list_contacts(
         query = query.where(
             (Contact.display_name.ilike(pattern))
             | (Contact.phone.ilike(pattern))
-            | (Contact.id.ilike(pattern))
+            | (Contact.external_id.ilike(pattern))
         )
     query = query.order_by(Contact.updated_at.desc())
     contacts = list(session.scalars(query))
@@ -960,6 +1178,7 @@ def list_contacts(
         return []
 
     contact_ids = [contact.id for contact in contacts]
+    external_ids = [contact.external_id for contact in contacts]
     tags_by_contact: dict[str, list[str]] = {contact_id: [] for contact_id in contact_ids}
     for row_contact_id, row_tag in session.execute(
         select(ContactTag.contact_id, ContactTag.name)
@@ -972,7 +1191,7 @@ def list_contacts(
     for attendance in session.scalars(
         select(Attendance)
         .where(
-            Attendance.contact_id.in_(contact_ids),
+            Attendance.contact_id.in_(external_ids),
             Attendance.id.in_(visible_attendance_ids(actor)),
         )
         .order_by(Attendance.updated_at.desc())
@@ -981,10 +1200,10 @@ def list_contacts(
 
     results = []
     for contact in contacts:
-        last = last_attendance_by_contact.get(contact.id)
+        last = last_attendance_by_contact.get(contact.external_id)
         results.append(
             ContactRead(
-                id=contact.id,
+                id=contact.external_id,
                 display_name=contact.display_name,
                 phone=contact.phone,
                 tags=tags_by_contact.get(contact.id, []),
@@ -1113,9 +1332,9 @@ async def update_contact_stage(
         raise HTTPException(status_code=404, detail="Contato não encontrado")
     ensure_can_edit_contact(session, contact_id, actor)
 
-    contact = session.get(Contact, contact_id)
+    contact = find_contact(session, actor.company_id, contact_id)
     if contact is None:
-        contact = Contact(id=contact_id)
+        contact = Contact(id=new_id(), company_id=actor.company_id, external_id=contact_id)
         session.add(contact)
         session.flush()
     if contact.stage != payload.stage:
@@ -1124,13 +1343,14 @@ async def update_contact_stage(
         session.add(
             ContactAuditEvent(
                 contact_id=contact_id,
+                company_id=actor.company_id,
                 actor_id=actor.id,
                 changed_fields=["stage"],
             )
         )
     session.commit()
     await request.app.state.realtime.publish(
-        {"type": "contact.updated", "contact_id": contact_id}
+        {"type": "contact.updated", "contact_id": contact_id, "company_id": actor.company_id}
     )
     return build_contact_read(session, contact_id, actor)
 
@@ -1162,13 +1382,13 @@ async def update_contact(
             seen_tags.add(key)
             normalized_tags.append(tag)
 
-    contact = session.get(Contact, contact_id)
-    current_tags = set(
-        session.scalars(select(ContactTag.name).where(ContactTag.contact_id == contact_id))
-    )
+    contact = find_contact(session, actor.company_id, contact_id)
+    current_tags = set(session.scalars(
+        select(ContactTag.name).where(ContactTag.contact_id == contact.id)
+    )) if contact else set()
     changed_fields: list[str] = []
     if contact is None:
-        contact = Contact(id=contact_id)
+        contact = Contact(id=new_id(), company_id=actor.company_id, external_id=contact_id)
         session.add(contact)
         session.flush()
     if contact.display_name != display_name:
@@ -1181,9 +1401,9 @@ async def update_contact(
         contact.stage = payload.stage
         changed_fields.append("stage")
     if current_tags != set(normalized_tags):
-        session.execute(delete(ContactTag).where(ContactTag.contact_id == contact_id))
+        session.execute(delete(ContactTag).where(ContactTag.contact_id == contact.id))
         session.add_all(
-            [ContactTag(contact_id=contact_id, name=tag) for tag in normalized_tags]
+            [ContactTag(contact_id=contact.id, name=tag) for tag in normalized_tags]
         )
         changed_fields.append("tags")
     if changed_fields:
@@ -1191,13 +1411,14 @@ async def update_contact(
         session.add(
             ContactAuditEvent(
                 contact_id=contact_id,
+                company_id=actor.company_id,
                 actor_id=actor.id,
                 changed_fields=changed_fields,
             )
         )
     session.commit()
     await request.app.state.realtime.publish(
-        {"type": "contact.updated", "contact_id": contact_id}
+        {"type": "contact.updated", "contact_id": contact_id, "company_id": actor.company_id}
     )
     return build_contact_read(session, contact_id, actor)
 
@@ -1214,6 +1435,7 @@ def metrics_summary(
             select(Message)
             .where(
                 Message.direction == MessageDirection.SAIDA,
+                Message.sender_type == SenderType.ATENDENTE,
                 Message.attendance_id.in_(visible_attendance_ids(actor)),
             )
             .order_by(Message.created_at)
@@ -1222,6 +1444,11 @@ def metrics_summary(
     closures = list(session.scalars(
         select(AttendanceClosure).where(
             AttendanceClosure.attendance_id.in_(visible_attendance_ids(actor))
+        )
+    ))
+    ratings = list(session.scalars(
+        select(AttendanceRating.score).where(
+            AttendanceRating.attendance_id.in_(visible_attendance_ids(actor))
         )
     ))
 
@@ -1267,6 +1494,8 @@ def metrics_summary(
         "closed_today": sum(
             1 for closure in closures if closure.created_at.date() == today
         ),
+        "average_rating": sum(ratings) / len(ratings) if ratings else None,
+        "ratings_count": len(ratings),
         "average_first_response_seconds": (
             sum(first_response_seconds) / len(first_response_seconds)
             if first_response_seconds
@@ -1302,7 +1531,7 @@ def list_attendances(
             Contact.phone,
             last_message.label("last_message"),
         )
-        .outerjoin(Contact, Contact.id == Attendance.contact_id)
+        .outerjoin(Contact, (Contact.external_id == Attendance.contact_id) & (Contact.company_id == Attendance.company_id))
         .where(Attendance.id.in_(visible_attendance_ids(actor)))
         .order_by(Attendance.updated_at.desc())
     )
@@ -1541,6 +1770,32 @@ async def change_status(
             )
         )
         enqueue_conversation_closed(session, attendance_id)
+        survey_options = [
+            {"id": f"rating:{attendance_id}:{score}", "title": f"{score} estrela{'s' if score > 1 else ''}"}
+            for score in range(1, 6)
+        ]
+        survey = Message(
+            attendance_id=attendance_id,
+            direction=MessageDirection.SAIDA,
+            sender_type=SenderType.BOT,
+            content="Como você avalia este atendimento? Escolha uma nota de 1 a 5.",
+            buttons=survey_options,
+            interaction_kind="list",
+            delivery_status=DeliveryStatus.PENDENTE,
+        )
+        session.add(survey)
+        session.flush()
+        session.add(OutboxMessage(
+            message_id=survey.id,
+            payload={
+                "message_id": survey.id,
+                "attendance_id": attendance_id,
+                "company_id": attendance.company_id,
+                "contact_id": attendance.contact_id,
+                "content": survey.content,
+                "list_options": survey_options,
+            },
+        ))
     session.commit()
     attendance = load_attendance(session, attendance_id, actor)
     await broadcast(request, "attendance.status_changed", attendance)
@@ -1555,9 +1810,13 @@ async def transfer_attendance(
     session: SessionDep,
     actor: ActorDep,
 ) -> Attendance:
-    if actor.role not in {ActorRole.SUPERVISOR, ActorRole.ADMIN}:
-        raise HTTPException(status_code=403, detail="Apenas supervisão pode transferir")
     attendance = load_attendance(session, attendance_id, actor)
+    if actor.role == ActorRole.ATENDENTE:
+        ensure_can_operate(attendance, actor)
+        if payload.target_group_id is None or payload.target_actor_id is not None:
+            raise HTTPException(status_code=403, detail="Atendente só pode redirecionar para fila de outro grupo")
+        if payload.target_group_id == attendance.group_id:
+            raise HTTPException(status_code=422, detail="Escolha outro grupo")
     previous_assignee = attendance.assignee_id
     previous_group_id = attendance.group_id
 
@@ -1577,11 +1836,28 @@ async def transfer_attendance(
         if not target_agent.active:
             raise HTTPException(status_code=422, detail="Atendente de destino inativo")
         if target_group_id is not None:
-            link = session.get(GroupAgent, (target_group_id, target_actor_id))
+            link = session.scalar(select(GroupAgent).where(
+                GroupAgent.group_id == target_group_id,
+                GroupAgent.agent_id == target_actor_id,
+                GroupAgent.active.is_(True),
+            ).with_for_update())
             if link is None or not link.active:
                 raise HTTPException(
                     status_code=422, detail="Atendente de destino não pertence ao grupo"
                 )
+            group = session.get(ServiceGroup, target_group_id)
+            if group is None or not group.active:
+                raise HTTPException(status_code=422, detail="Grupo de destino inativo")
+            ensure_group_capacity(session, group, attendance)
+            capacity = link.max_load_override or group.max_active_attendances
+            current_load = int(session.scalar(select(func.coalesce(func.sum(Attendance.load_weight), 0)).where(
+                Attendance.assignee_id == target_actor_id,
+                Attendance.company_id == actor.company_id,
+                Attendance.status.in_(ACTIVE_STATUSES),
+            )) or 0)
+            additional = 0 if target_actor_id == attendance.assignee_id else attendance.load_weight
+            if current_load + additional > capacity:
+                raise HTTPException(status_code=409, detail="Atendente de destino atingiu a capacidade")
 
     values = {
         "status": AttendanceStatus.EM_ATENDIMENTO,
@@ -1623,8 +1899,8 @@ async def transfer_attendance(
         )
     )
     session.commit()
-    attendance = load_attendance(session, attendance_id, actor)
-    await broadcast(request, "attendance.transferred", attendance)
+    attendance = load_attendance(session, attendance_id)
+    await broadcast(request, "attendance.transferred", attendance, previous_group_id)
     return attendance
 
 
@@ -1660,6 +1936,8 @@ async def send_message(
         sender_type=SenderType.ATENDENTE,
         actor_id=actor.id,
         content=payload.content,
+        buttons=[button.model_dump() for button in payload.buttons],
+        interaction_kind="button" if payload.buttons else None,
         delivery_status=DeliveryStatus.PENDENTE,
     )
     session.add(message)
@@ -1673,6 +1951,8 @@ async def send_message(
                     "attendance_id": attendance.id,
                     "contact_id": attendance.contact_id,
                     "content": message.content,
+                    "company_id": attendance.company_id,
+                    **({"buttons": message.buttons} if message.buttons else {}),
                 },
             ),
             AttendanceEvent(
@@ -1749,6 +2029,7 @@ async def send_attachment(
                     "message_id": message.id,
                     "attendance_id": attendance.id,
                     "contact_id": attendance.contact_id,
+                    "company_id": attendance.company_id,
                     "content": message.content,
                     "media": {
                         "storage_key": storage_key,
@@ -1836,6 +2117,8 @@ def create_quick_reply(
 ) -> QuickReply:
     if actor.role not in {ActorRole.SUPERVISOR, ActorRole.ADMIN}:
         raise HTTPException(status_code=403, detail="Apenas supervisão pode criar resposta rápida")
+    if not payload.title.strip() or not payload.content.strip():
+        raise HTTPException(status_code=422, detail="Título e conteúdo são obrigatórios")
     if payload.group_id is not None:
         load_group(session, actor, payload.group_id)
     quick_reply = QuickReply(
@@ -1864,6 +2147,36 @@ def delete_quick_reply(
         raise HTTPException(status_code=404, detail="Resposta rápida não encontrada")
     quick_reply.active = False
     session.commit()
+
+
+@router.patch("/quick-replies/{quick_reply_id}", response_model=QuickReplyRead)
+def update_quick_reply(
+    quick_reply_id: str,
+    payload: QuickReplyUpdate,
+    session: SessionDep,
+    actor: ActorDep,
+) -> QuickReply:
+    if actor.role not in {ActorRole.SUPERVISOR, ActorRole.ADMIN}:
+        raise HTTPException(status_code=403, detail="Apenas supervisão pode editar resposta rápida")
+    reply = session.get(QuickReply, quick_reply_id)
+    if reply is None or reply.company_id != actor.company_id or not reply.active:
+        raise HTTPException(status_code=404, detail="Resposta rápida não encontrada")
+    changes = payload.model_fields_set
+    if "title" in changes:
+        if not payload.title or not payload.title.strip():
+            raise HTTPException(status_code=422, detail="Título obrigatório")
+        reply.title = payload.title.strip()
+    if "content" in changes:
+        if not payload.content or not payload.content.strip():
+            raise HTTPException(status_code=422, detail="Conteúdo obrigatório")
+        reply.content = payload.content.strip()
+    if "group_id" in changes:
+        if payload.group_id is not None:
+            load_group(session, actor, payload.group_id)
+        reply.group_id = payload.group_id
+    session.commit()
+    session.refresh(reply)
+    return reply
 
 
 @router.get("/integrations/outbox", response_model=list[OutboxItemRead])

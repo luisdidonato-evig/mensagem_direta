@@ -29,6 +29,7 @@ const state = {
   editingGroupId: null,
   membershipGroupId: null,
   quickReplies: [],
+  editingQuickReplyId: null,
   selectedId: null,
   selected: null,
   selectedContact: null,
@@ -83,7 +84,9 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Falha inesperada" }));
-    throw new Error(error.detail || `HTTP ${response.status}`);
+    const failure = new Error(error.detail || `HTTP ${response.status}`);
+    failure.status = response.status;
+    throw failure;
   }
   if (response.status === 204) return null;
   return response.json();
@@ -131,6 +134,7 @@ function renderMetrics(metrics) {
   $("#metric-first-response").textContent = formatDuration(metrics.average_first_response_seconds);
   $("#metric-resolution").textContent = formatDuration(metrics.average_resolution_seconds);
   $("#metric-closed").textContent = metrics.closed_today;
+  $("#metric-rating").textContent = metrics.average_rating == null ? "—" : `${metrics.average_rating.toFixed(1)}/5`;
 }
 
 function latestPreview(item) {
@@ -216,8 +220,13 @@ function renderBoard() {
     const items = filtered.filter((item) => item.status === status);
     const cards = items.length ? items.map((item) => {
       const tags = (item.tags || []).slice(0, 3).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
+      const group = state.groups.find((entry) => entry.id === item.group_id);
+      const groupIndex = state.groups.findIndex((entry) => entry.id === item.group_id);
+      const groupBadge = state.actor?.role === "ADMIN"
+        ? `<span class="card-group group-color-${Math.max(0, groupIndex) % 6}">${escapeHtml(group?.name || "Sem grupo")}</span>` : "";
       return `
       <button class="card ${item.stale ? "stale" : ""}" data-attendance-id="${item.id}">
+        ${groupBadge}
         <span class="card-main">
           <span class="avatar">${escapeHtml(initials(contactLabel(item)))}</span>
           <span class="card-text">
@@ -227,7 +236,7 @@ function renderBoard() {
         </span>
         ${tags ? `<span class="card-tags">${tags}</span>` : ""}
         <span class="card-foot">
-          <span><i class="owner-dot ${item.assignee_id ? "assigned" : ""}"></i>${escapeHtml(item.assignee_id || "Sem responsável")} · ${escapeHtml(state.groups.find((group) => group.id === item.group_id)?.name || "Fila central")}</span>
+          <span><i class="owner-dot ${item.assignee_id ? "assigned" : ""}"></i>${escapeHtml(item.assignee_id || "Sem responsável")}${state.actor?.role === "SUPERVISOR" ? ` · ${escapeHtml(group?.name || "Sem grupo")}` : ""}</span>
           <span>${relativeTime(item.updated_at)}</span>
         </span>
       </button>
@@ -312,7 +321,7 @@ function renderManagement() {
   $("#groups-list").innerHTML = state.groups.length ? state.groups.map((group) => {
     const links = state.memberships.filter((link) => link.group_id === group.id);
     return `<article class="management-item">
-      <div class="management-item-main"><div><strong>${escapeHtml(group.name)}</strong><small>${group.active ? "Ativo" : "Inativo"} · capacidade ${group.max_load_per_agent} por atendente</small></div></div>
+      <div class="management-item-main"><div><strong>${escapeHtml(group.name)}</strong><small>${group.active ? "Ativo" : "Inativo"} · carga ${group.max_active_attendances} · custo ${group.load_cost_per_attendance} por atendimento</small></div></div>
       <div class="member-list">${links.length ? links.map((link) => `<div class="member-row"><span>${escapeHtml(link.agent_id)}${link.max_load_override ? ` · limite ${link.max_load_override}` : ""}</span><span>${memberActions(group, link)}</span></div>`).join("") : '<small>Nenhum usuário vinculado</small>'}</div>
       <div class="management-actions"><button type="button" class="button ghost" data-link-group="${escapeHtml(group.id)}" ${group.active ? "" : "disabled"}>＋ Vincular usuário</button>${state.actor?.role === "ADMIN" ? `<button type="button" class="button ghost" data-edit-group="${escapeHtml(group.id)}">Editar grupo</button>` : ""}</div>
     </article>`;
@@ -359,7 +368,9 @@ function openGroupDialog(groupId = null) {
   state.editingGroupId = group?.id || null;
   $("#group-dialog-title").textContent = group ? "Editar grupo" : "Novo grupo";
   $("#group-name").value = group?.name || "";
-  $("#group-capacity").value = group?.max_load_per_agent || 5;
+  $("#group-capacity").value = group?.max_active_attendances || 5;
+  $("#group-load-cost").value = group?.load_cost_per_attendance ?? 1;
+  $("#group-wait-message").value = group?.queue_wait_message || "Você entrou na fila de espera para ser atendido.";
   $("#group-active-label").hidden = !group;
   $("#group-active").checked = group?.active ?? true;
   $("#group-dialog").showModal();
@@ -368,7 +379,8 @@ function openGroupDialog(groupId = null) {
 async function saveGroup(event) {
   event.preventDefault();
   const id = state.editingGroupId;
-  const payload = { name: $("#group-name").value.trim(), max_load_per_agent: Number($("#group-capacity").value) };
+  const payload = { name: $("#group-name").value.trim(), max_active_attendances: Number($("#group-capacity").value), load_cost_per_attendance: Number($("#group-load-cost").value), queue_wait_message: $("#group-wait-message").value.trim() };
+  if (!id) payload.max_load_per_agent = payload.max_active_attendances;
   if (id) payload.active = $("#group-active").checked;
   try {
     await api(id ? `/api/v1/groups/${encodeURIComponent(id)}` : "/api/v1/groups", {
@@ -422,6 +434,10 @@ async function unlinkMembership(groupId, agentId) {
 }
 
 function populateTransferAgents() {
+  if (state.actor?.role === "ATENDENTE") {
+    $("#transfer-agent").innerHTML = '<option value="">Fila do grupo, sem responsável</option>';
+    return;
+  }
   const groupId = $("#transfer-group").value;
   const candidates = state.agents.filter((agent) => agent.active && state.memberships.some((link) => link.group_id === groupId && link.agent_id === agent.id));
   $("#transfer-agent").innerHTML = '<option value="">Fila do grupo, sem responsável</option>' + candidates
@@ -430,18 +446,26 @@ function populateTransferAgents() {
 
 async function openTransferDialog() {
   try {
-    const [agents, memberships, groups] = await Promise.all([
-      api("/api/v1/agents"), api("/api/v1/groups/memberships"), api("/api/v1/groups"),
-    ]);
-    state.agents = agents;
-    state.memberships = memberships;
-    state.groups = groups;
-    $("#transfer-group").innerHTML = state.groups.filter((group) => group.active)
+    const manager = ["SUPERVISOR", "ADMIN"].includes(state.actor?.role);
+    const groups = await api("/api/v1/groups/transfer-targets");
+    const targets = manager ? groups : groups.filter((group) => group.id !== state.selected.group_id);
+    if (!targets.length) { toast("Nenhum outro grupo disponível"); return; }
+    if (manager) {
+      [state.agents, state.memberships] = await Promise.all([
+        api("/api/v1/agents"), api("/api/v1/groups/memberships"),
+      ]);
+    }
+    $("#transfer-agent-field").hidden = !manager;
+    $("#transfer-group").innerHTML = targets
       .map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`).join("");
     $("#transfer-group").value = state.selected.group_id;
     if (!$("#transfer-group").value) $("#transfer-group").selectedIndex = 0;
-    populateTransferAgents();
-    $("#transfer-agent").value = state.selected.assignee_id || "";
+    if (manager) {
+      populateTransferAgents();
+      $("#transfer-agent").value = state.selected.assignee_id || "";
+    } else {
+      $("#transfer-agent").value = "";
+    }
     $("#transfer-dialog").showModal();
   } catch (error) { toast(error.message); }
 }
@@ -456,7 +480,15 @@ async function transferSelected(event) {
       body: JSON.stringify({ target_group_id: groupId, target_actor_id: agentId || null, expected_version: state.selected.version }),
     });
     $("#transfer-dialog").close();
-    await refreshSelected();
+    if (state.actor?.role === "ATENDENTE") {
+      closeDetail();
+      state.selectedId = null;
+      state.selected = null;
+      state.selectedContact = null;
+      await loadBoard();
+    } else {
+      await refreshSelected();
+    }
     toast("Atendimento transferido");
   } catch (error) { toast(error.message); await refreshSelected(); }
 }
@@ -626,6 +658,7 @@ function renderDetail() {
   $("#profile-queue").textContent = item.queue_id;
   $("#profile-team").textContent = item.team_id || "Não definida";
   $("#profile-group").textContent = state.groups.find((group) => group.id === item.group_id)?.name || item.queue_id;
+  $("#profile-rating").textContent = item.rating ? `${item.rating.score}/5 estrelas` : "Ainda não avaliado";
   $("#profile-stage").value = contact.stage || "NAO_CLASSIFICADO";
   $("#compose-contact").textContent = item.contact_id;
   $("#profile-tags").innerHTML = contact.tags.length
@@ -640,7 +673,9 @@ function renderDetail() {
     return `
     <article class="message ${out ? "out" : "in"}">
       <span class="message-row">
-        <div class="message-bubble">${escapeHtml(message.content)}${message.attachment
+        <div class="message-bubble">${escapeHtml(message.content)}${(message.buttons || []).length
+          ? `<div class="message-options">${message.buttons.map((button) => `<span class="quick-reply-chip">${escapeHtml(button.title)}</span>`).join("")}</div>`
+          : ""}${message.attachment
           ? `<button class="text-button attachment-link" type="button" data-attachment-id="${escapeHtml(message.attachment.id)}" data-filename="${escapeHtml(message.attachment.filename)}">📎 ${escapeHtml(message.attachment.filename)}</button>`
           : ""}</div>
         ${out ? '<span class="sender-dot" title="Enviado por atendente humano" aria-hidden="true">👤</span>' : ""}
@@ -664,7 +699,7 @@ function renderDetail() {
     actions.push('<button class="button danger" data-action="close">Encerrar</button>');
   }
   if (["AGUARDANDO_CLIENTE", "AGUARDANDO_INTERNO"].includes(item.status) && canOperate) actions.push(actionButton("Retomar atendimento", "EM_ATENDIMENTO"));
-  if (item.status !== "ENCERRADO" && manager) actions.push('<button class="button ghost" data-action="transfer">Transferir</button>');
+  if (item.status !== "ENCERRADO" && canOperate) actions.push('<button class="button ghost" data-action="transfer">Redirecionar grupo</button>');
   $("#detail-actions").innerHTML = actions.join("") || '<small>Sem ações disponíveis</small>';
 
   const canSend = item.status !== "ENCERRADO" && canOperate;
@@ -701,9 +736,17 @@ async function refreshSelected() {
   await loadBoard();
   if (state.contactsLoaded) await loadContacts();
   if (state.selectedId) {
-    state.selected = await api(`/api/v1/attendances/${state.selectedId}`);
-    state.selectedContact = await api(`/api/v1/contacts/${state.selected.contact_id}`);
-    renderDetail();
+    try {
+      state.selected = await api(`/api/v1/attendances/${state.selectedId}`);
+      state.selectedContact = await api(`/api/v1/contacts/${state.selected.contact_id}`);
+      renderDetail();
+    } catch (error) {
+      if (![403, 404].includes(error.status)) throw error;
+      closeDetail();
+      state.selectedId = null;
+      state.selected = null;
+      state.selectedContact = null;
+    }
   }
 }
 
@@ -764,8 +807,9 @@ async function loadQuickReplies() {
 }
 
 function renderQuickReplyChips() {
-  $("#quick-replies-list").innerHTML = state.quickReplies.length
-    ? state.quickReplies.map((reply) => `<button type="button" class="quick-reply-chip" data-quick-reply-id="${reply.id}">${escapeHtml(reply.title)}</button>`).join("")
+  const replies = state.quickReplies.filter((reply) => !reply.group_id || reply.group_id === state.selected?.group_id);
+  $("#quick-replies-list").innerHTML = replies.length
+    ? replies.map((reply) => `<button type="button" class="quick-reply-chip" data-quick-reply-id="${reply.id}">${escapeHtml(reply.title)}</button>`).join("")
     : "";
   document.querySelectorAll("[data-quick-reply-id]").forEach((chip) => {
     chip.addEventListener("click", () => {
@@ -776,12 +820,27 @@ function renderQuickReplyChips() {
 }
 
 function renderQuickReplyManageList() {
+  const manager = ["SUPERVISOR", "ADMIN"].includes(state.actor?.role);
+  $("#quick-reply-group").innerHTML = '<option value="">Todos os grupos</option>' + state.groups.map((group) => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`).join("");
   $("#quick-reply-manage-list").innerHTML = state.quickReplies.map((reply) => `
     <article class="quick-reply-item">
-      <div><strong>${escapeHtml(reply.title)}</strong><p>${escapeHtml(reply.content)}</p></div>
-      <button type="button" class="icon-button" data-remove-quick-reply="${reply.id}" aria-label="Remover">×</button>
+      <div><strong>${escapeHtml(reply.title)}</strong><small> · ${escapeHtml(state.groups.find((group) => group.id === reply.group_id)?.name || "Todos os grupos")}</small><p>${escapeHtml(reply.content)}</p></div>
+      ${manager ? `<button type="button" class="text-button" data-edit-quick-reply="${reply.id}">Editar</button><button type="button" class="icon-button" data-remove-quick-reply="${reply.id}" aria-label="Remover">×</button>` : ""}
     </article>
   `).join("");
+  $("#quick-reply-form").hidden = !manager;
+  document.querySelectorAll("[data-edit-quick-reply]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const reply = state.quickReplies.find((item) => item.id === button.dataset.editQuickReply);
+      if (!reply) return;
+      state.editingQuickReplyId = reply.id;
+      $("#quick-reply-title").value = reply.title;
+      $("#quick-reply-content").value = reply.content;
+      $("#quick-reply-group").value = reply.group_id || "";
+      $("#save-quick-reply").textContent = "Salvar resposta rápida";
+      $("#cancel-quick-reply-edit").hidden = false;
+    });
+  });
   document.querySelectorAll("[data-remove-quick-reply]").forEach((button) => {
     button.addEventListener("click", () => deleteQuickReply(button.dataset.removeQuickReply));
   });
@@ -790,19 +849,29 @@ function renderQuickReplyManageList() {
 async function createQuickReply(event) {
   event.preventDefault();
   try {
-    await api("/api/v1/quick-replies", {
-      method: "POST",
+    const id = state.editingQuickReplyId;
+    await api(id ? `/api/v1/quick-replies/${id}` : "/api/v1/quick-replies", {
+      method: id ? "PATCH" : "POST",
       body: JSON.stringify({
         title: $("#quick-reply-title").value.trim(),
         content: $("#quick-reply-content").value.trim(),
+        group_id: $("#quick-reply-group").value || null,
       }),
     });
-    $("#quick-reply-title").value = "";
-    $("#quick-reply-content").value = "";
+    cancelQuickReplyEdit();
     await loadQuickReplies();
     renderQuickReplyManageList();
-    toast("Resposta rápida adicionada");
+    toast(id ? "Resposta rápida atualizada" : "Resposta rápida adicionada");
   } catch (error) { toast(error.message); }
+}
+
+function cancelQuickReplyEdit() {
+  state.editingQuickReplyId = null;
+  $("#quick-reply-title").value = "";
+  $("#quick-reply-content").value = "";
+  $("#quick-reply-group").value = "";
+  $("#save-quick-reply").textContent = "Adicionar resposta rápida";
+  $("#cancel-quick-reply-edit").hidden = true;
 }
 
 async function deleteQuickReply(id) {
@@ -929,6 +998,9 @@ async function sendMessage(event) {
   event.preventDefault();
   const content = $("#message-content").value.trim();
   const file = $("#message-file").files[0];
+  const titles = $("#message-buttons").value.split(",").map((title) => title.trim()).filter(Boolean);
+  if (titles.length > 3 || titles.some((title) => title.length > 20)) { toast("Use até 3 botões com 20 caracteres cada"); return; }
+  if (file && titles.length) { toast("Botões só podem acompanhar mensagem de texto"); return; }
   if (!content && !file) return;
   try {
     if (file) {
@@ -940,11 +1012,12 @@ async function sendMessage(event) {
     } else {
       await api(`/api/v1/attendances/${state.selectedId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ content, client_message_id: crypto.randomUUID() }),
+        body: JSON.stringify({ content, client_message_id: crypto.randomUUID(), buttons: titles.map((title) => ({ id: crypto.randomUUID(), title })) }),
       });
     }
     $("#message-content").value = "";
     $("#message-file").value = "";
+    $("#message-buttons").value = "";
     $("#compose-dialog").close();
     await refreshSelected();
     toast("Mensagem registrada para envio");
@@ -991,6 +1064,16 @@ function renderSessionBadge() {
   $("#session-actor").textContent = `${state.actor.id} · ${state.actor.role}`;
 }
 
+
+async function loadCompany() {
+  try {
+    const company = await api("/api/v1/me/company");
+    $("#company-logo").textContent = company.name.trim().charAt(0).toLocaleUpperCase("pt-BR") || "C";
+    $("#company-logo").setAttribute("aria-label", `${company.name} · Atendimento`);
+    document.title = `${company.name} · Atendimento`;
+  } catch (error) { toast(error.message); }
+}
+
 function showLoginDialog() {
   $("#login-dialog").showModal();
   $("#login-id").focus();
@@ -1020,6 +1103,7 @@ function logout() {
 
 function boot() {
   renderSessionBadge();
+  loadCompany();
   $("#nav-team").hidden = state.actor?.role === "ATENDENTE";
   $("#outbox-button").hidden = state.actor?.role === "ATENDENTE";
   $("#new-group-button").hidden = state.actor?.role !== "ADMIN";
@@ -1103,6 +1187,7 @@ $("#close-attendance-tags-dialog").addEventListener("click", () => $("#attendanc
 $("#manage-quick-replies").addEventListener("click", () => { renderQuickReplyManageList(); $("#quick-reply-dialog").showModal(); });
 $("#close-quick-reply-dialog").addEventListener("click", () => $("#quick-reply-dialog").close());
 $("#quick-reply-form").addEventListener("submit", createQuickReply);
+$("#cancel-quick-reply-edit").addEventListener("click", cancelQuickReplyEdit);
 $("#outbox-button").addEventListener("click", openOutboxDialog);
 $("#close-outbox-dialog").addEventListener("click", () => $("#outbox-dialog").close());
 $("#process-outbox").addEventListener("click", processOutboxNow);

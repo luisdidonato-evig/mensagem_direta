@@ -2,6 +2,7 @@ import logging
 import os
 import asyncio
 import secrets
+import json
 from contextlib import asynccontextmanager
 from contextlib import suppress
 from pathlib import Path
@@ -14,7 +15,7 @@ from app.analytics import process_analytics_outbox
 from app.api import router
 from app.database import Database
 from app.domain import ActorRole
-from app.integration import MetaCloudApiSender, OutboxProcessor, run_outbox_worker
+from app.integration import MetaCloudApiSender, OutboxProcessor, TenantMetaSender, run_outbox_worker
 from app.media import MetaMediaDownloader
 from app.models import Agent, Company, GroupAgent, ServiceGroup
 from app.realtime import ConnectionManager
@@ -79,6 +80,7 @@ def create_app(
     enable_simulator: bool | None = None,
     jwt_secret: str | None = None,
     media_storage_dir: str | None = None,
+    meta_tenants: list[dict] | None = None,
 ) -> FastAPI:
     project_root = Path(__file__).resolve().parent.parent
     resolved_url = database_url or os.getenv(
@@ -104,6 +106,26 @@ def create_app(
     resolved_phone_number_id = meta_phone_number_id or os.getenv("META_PHONE_NUMBER_ID", "")
     resolved_default_group_id = meta_default_group_id or os.getenv("META_DEFAULT_GROUP_ID", "")
     resolved_graph_version = meta_graph_version or os.getenv("META_GRAPH_VERSION", "v23.0")
+    tenant_configs = meta_tenants if meta_tenants is not None else json.loads(os.getenv("META_TENANTS_JSON", "[]"))
+    if not isinstance(tenant_configs, list):
+        raise ValueError("META_TENANTS_JSON deve ser uma lista")
+    tenants_by_phone: dict[str, dict] = {}
+    senders_by_company: dict[str, MetaCloudApiSender] = {}
+    for config in tenant_configs:
+        required = ("company_id", "group_id", "phone_number_id", "access_token", "app_secret", "verify_token")
+        if not isinstance(config, dict) or any(not config.get(key) for key in required):
+            raise ValueError("Configuração Meta de empresa incompleta")
+        phone_id = config["phone_number_id"]
+        company_id = config["company_id"]
+        if phone_id in tenants_by_phone or company_id in senders_by_company:
+            raise ValueError("Número ou empresa Meta duplicado")
+        tenants_by_phone[phone_id] = config
+        senders_by_company[company_id] = MetaCloudApiSender(
+            phone_number_id=phone_id,
+            access_token=config["access_token"],
+            graph_version=config.get("graph_version", resolved_graph_version),
+            media_storage_dir=resolved_media_dir,
+        )
     simulator_enabled = enable_simulator
     if simulator_enabled is None:
         simulator_enabled = os.getenv("ENABLE_SIMULATOR", "true").lower() == "true"
@@ -115,15 +137,18 @@ def create_app(
             "tokens ficam inválidos a cada reinício. Defina JWT_SECRET antes de produção."
         )
     outbox_processor = None
-    if resolved_access_token and resolved_phone_number_id:
-        outbox_processor = OutboxProcessor(
-            database.session_factory,
-            MetaCloudApiSender(
+    legacy_sender = None
+    if resolved_access_token and resolved_phone_number_id and not tenant_configs:
+        legacy_sender = MetaCloudApiSender(
                 phone_number_id=resolved_phone_number_id,
                 access_token=resolved_access_token,
                 graph_version=resolved_graph_version,
                 media_storage_dir=resolved_media_dir,
-            ),
+        )
+        senders_by_company.setdefault(DEV_COMPANY_ID, legacy_sender)
+    if senders_by_company:
+        outbox_processor = OutboxProcessor(
+            database.session_factory, TenantMetaSender(senders_by_company, legacy_sender)
         )
 
     @asynccontextmanager
@@ -164,6 +189,13 @@ def create_app(
     app.state.meta_media_downloader = MetaMediaDownloader(
         resolved_access_token, resolved_graph_version
     )
+    app.state.meta_media_downloaders = {
+        phone_id: MetaMediaDownloader(
+            config["access_token"], config.get("graph_version", resolved_graph_version)
+        )
+        for phone_id, config in tenants_by_phone.items()
+    }
+    app.state.meta_tenants = tenants_by_phone
     app.include_router(router)
     app.mount("/static", StaticFiles(directory=project_root / "static"), name="static")
 

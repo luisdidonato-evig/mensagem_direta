@@ -196,6 +196,23 @@ def test_agent_only_sees_contacts_and_metrics_from_own_groups(client):
     ] == 0
 
 
+def test_management_sees_all_company_groups_but_operator_only_memberships(client):
+    admin = login_headers(client, "admin-1")
+    supervisor = login_headers(client, "supervisor-1")
+    operator = login_headers(client, "agente-1")
+    private_group = create_group(client, admin, "Fila exclusiva")
+    link_agent(client, admin, private_group["id"], "agente-2")
+    private_attendance = send_inbound(client, "contato-exclusivo", private_group["id"])
+    for manager in (admin, supervisor):
+        assert private_attendance["id"] in {
+            item["id"] for item in client.get("/api/v1/attendances", headers=manager).json()
+        }
+    assert private_attendance["id"] not in {
+        item["id"] for item in client.get("/api/v1/attendances", headers=operator).json()
+    }
+    assert client.get(f"/api/v1/attendances/{private_attendance['id']}", headers=operator).status_code == 403
+
+
 def test_websocket_requires_token_and_delivers_visible_event(client):
     with client.websocket_connect("/api/v1/ws") as socket:
         socket.send_json({"token": "invalid"})

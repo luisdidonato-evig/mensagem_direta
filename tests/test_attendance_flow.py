@@ -96,7 +96,7 @@ def test_vertical_slice(client, inbound_payload, agent_headers):
         f"/api/v1/attendances/{attendance['id']}", headers=agent_headers
     )
     assert detail.status_code == 200
-    assert len(detail.json()["messages"]) == 3
+    assert len(detail.json()["messages"]) == 4  # inclui pesquisa de satisfação
     assert [event["type"] for event in detail.json()["events"]] == [
         "CRIADO",
         "MENSAGEM_RECEBIDA",

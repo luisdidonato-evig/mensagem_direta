@@ -109,7 +109,8 @@ input, select, textarea { border: 1px solid var(--line); border-radius: 8px; col
 .connection { padding: 5px 8px; border-radius: 999px; white-space: nowrap; font-size: 10px; font-weight: 800; }
 .connection.online { color: #167563; background: #e3f4ef; }
 .connection.offline { color: var(--danger); background: #fae7e7; }
-.metrics-strip { display: grid; grid-template-columns: repeat(6, minmax(105px, 1fr)); gap: 1px; margin-top: 10px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--line); }
+.metrics-strip { display: grid; grid-template-columns: repeat(7, minmax(95px, 1fr)); gap: 1px; margin-top: 10px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--line); }
+.message-options { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 .metrics-strip > div { min-width: 0; padding: 8px 12px; background: #fff; }
 .metrics-strip span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 800; }
 .metrics-strip small { color: var(--muted); font-size: 9px; }
@@ -152,6 +153,13 @@ input, select, textarea { border: 1px solid var(--line); border-radius: 8px; col
   transition: border-color .15s, transform .15s, box-shadow .15s;
 }
 .card:hover { transform: translateY(-1px); border-color: #b9c4ee; box-shadow: 0 7px 18px rgb(23 30 48 / 7%); }
+.card-group { display: inline-block; margin-bottom: 9px; padding: 4px 9px; border-radius: 7px; font-size: 10px; font-weight: 800; }
+.group-color-0 { color: #154e8b; background: #dcecff; }
+.group-color-1 { color: #805016; background: #fff0d5; }
+.group-color-2 { color: #5d328a; background: #eddefc; }
+.group-color-3 { color: #176750; background: #d8f5e9; }
+.group-color-4 { color: #8c384d; background: #ffe2e9; }
+.group-color-5 { color: #525d15; background: #edf3ce; }
 .card-main { display: flex; align-items: center; gap: 10px; }
 .card-text { min-width: 0; flex: 1; }
 .card-contact { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 750; }

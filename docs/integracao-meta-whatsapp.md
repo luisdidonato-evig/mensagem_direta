@@ -35,13 +35,13 @@ X-Hub-Signature-256: sha256=<HMAC-SHA256(META_APP_SECRET, corpo bruto)>
 
 Eventos suportados nesta etapa:
 
-- mensagem recebida do tipo `text`, `image` (JPEG/PNG) ou `document` (PDF);
+- mensagem recebida do tipo `text`, `interactive` (resposta a botão/lista), `button`, `image` (JPEG/PNG) ou `document` (PDF);
 - status `sent`, `delivered`, `read` e `failed`;
 - nome de perfil e `wa_id` do contato.
 
 Cada mensagem recebida usa o `wamid` como chave idempotente. Reentregas do mesmo webhook não criam mensagens duplicadas. Um status atrasado não reduz uma mensagem de `LIDA` para `ENTREGUE`.
 
-Outras mídias, reação, localização, contato, botão, lista, edição e exclusão são contabilizados como ignorados até seus adaptadores serem implementados. Imagens e PDFs são baixados da Meta e guardados em `MEDIA_STORAGE_DIR`, fora de `/static`, com download autenticado pelo painel. Imagem: até 5 MB; PDF: até 16 MB.
+Outras mídias, reação, localização, contato, edição e exclusão são contabilizados como ignorados até seus adaptadores serem implementados. Imagens e PDFs são baixados da Meta e guardados em `MEDIA_STORAGE_DIR`, fora de `/static`, com download autenticado pelo painel. Imagem: até 5 MB; PDF: até 16 MB.
 
 ## Envio
 
@@ -53,6 +53,21 @@ Authorization: Bearer {META_ACCESS_TOKEN}
 ```
 
 Texto usa `type=text`. Imagem/PDF são enviados primeiro para `/{phone-number-ID}/media`, depois como `image`/`document` com o ID retornado. O ID interno da outbox segue em `biz_opaque_callback_data` para correlação. A mensagem local fica `ACEITA_PELO_PROVEDOR` quando a API retorna um `wamid`; depois, webhooks avançam para `ENTREGUE`, `LIDA` ou `FALHA`.
+
+Texto com até três botões usa `type=interactive` e `interactive.type=button`. O encerramento enfileira uma lista interativa com notas 1–5; a resposta do cliente registra uma avaliação única para o atendimento encerrado. A janela de atendimento e eventuais templates aprovados continuam sujeitos às regras da Meta.
+
+## Multiempresa
+
+1. Execute `python -m alembic upgrade head` e `python -m app.provision_tenant --company "Nome" --admin-id admin-empresa`. A senha é solicitada no terminal; o comando devolve `company_id` e `group_id`.
+2. Configure `META_TENANTS_JSON` no ambiente como lista JSON. Exemplo para uma empresa:
+
+```json
+[{"company_id":"UUID_DA_EMPRESA","group_id":"UUID_DO_GRUPO","phone_number_id":"ID_DO_NUMERO","access_token":"TOKEN","app_secret":"APP_SECRET","verify_token":"TOKEN_DE_VERIFICACAO"}]
+```
+
+3. Cadastre o callback `https://SEU-DOMINIO/api/v1/integrations/meta/whatsapp/webhook/ID_DO_NUMERO` no aplicativo Meta dessa empresa. O webhook valida assinatura com o `app_secret` correspondente e confere `metadata.phone_number_id` antes de processar. O token de acesso da empresa é usado também no envio e no download de mídia.
+
+Cada número aponta para uma empresa e grupo inicial. Não use as variáveis legadas `META_ACCESS_TOKEN`/`META_PHONE_NUMBER_ID` junto com `META_TENANTS_JSON`. Com a lista configurada, o callback sem ID do número fica desativado. Proteja o ambiente de execução: tokens e segredos não são gravados no banco.
 
 ## Pendências antes da produção
 
