@@ -10,6 +10,13 @@ class AttendanceStatus(str, Enum):
     ENCERRADO = "ENCERRADO"
 
 
+class AutomationMode(str, Enum):
+    AI_ACTIVE = "AI_ACTIVE"
+    HUMAN_REQUESTED = "HUMAN_REQUESTED"
+    HUMAN_ACTIVE = "HUMAN_ACTIVE"
+    PAUSED = "PAUSED"
+
+
 class ActorRole(str, Enum):
     ATENDENTE = "ATENDENTE"
     SUPERVISOR = "SUPERVISOR"
@@ -47,6 +54,9 @@ class EventType(str, Enum):
     STATUS_ALTERADO = "STATUS_ALTERADO"
     TRANSFERIDO = "TRANSFERIDO"
     AVALIADO = "AVALIADO"
+    HANDOFF_SOLICITADO = "HANDOFF_SOLICITADO"
+    IA_RETOMADA = "IA_RETOMADA"
+    AUTOMACAO_PAUSADA = "AUTOMACAO_PAUSADA"
 
 
 class ClosureReason(str, Enum):
@@ -90,3 +100,36 @@ ALLOWED_STATUS_TRANSITIONS = {
     AttendanceStatus.AGUARDANDO_CLIENTE: {AttendanceStatus.EM_ATENDIMENTO},
     AttendanceStatus.AGUARDANDO_INTERNO: {AttendanceStatus.EM_ATENDIMENTO},
 }
+
+
+# Transições permitidas de modo de automação (handoff IA/humano).
+# Escolha segura P0: default AI_ACTIVE. Como o gateway de IA ainda não está
+# integrado, a IA nunca responde de fato; o modo apenas registra a intenção de
+# domínio para que mensagens inbound sejam distinguidas (IA vs humano) sem serem
+# encaminhadas ao provedor de IA.
+ALLOWED_AUTOMATION_TRANSITIONS = {
+    AutomationMode.AI_ACTIVE: {
+        AutomationMode.HUMAN_REQUESTED,
+        AutomationMode.HUMAN_ACTIVE,
+        AutomationMode.PAUSED,
+    },
+    AutomationMode.HUMAN_REQUESTED: {
+        AutomationMode.HUMAN_ACTIVE,
+        AutomationMode.AI_ACTIVE,
+        AutomationMode.PAUSED,
+    },
+    AutomationMode.HUMAN_ACTIVE: {
+        AutomationMode.AI_ACTIVE,
+        AutomationMode.PAUSED,
+    },
+    AutomationMode.PAUSED: {
+        AutomationMode.AI_ACTIVE,
+        AutomationMode.HUMAN_ACTIVE,
+        AutomationMode.HUMAN_REQUESTED,
+    },
+}
+
+
+# Modos em que a IA controla o atendimento (mensagens inbound seriam roteadas à
+# IA quando o gateway existir). Fora destes, o humano é responsável.
+AI_CONTROLLED_MODES = frozenset({AutomationMode.AI_ACTIVE})

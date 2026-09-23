@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.domain import (
     ActorRole,
     AttendanceStatus,
+    AutomationMode,
     ClosureReason,
     ContactStage,
     DeliveryStatus,
@@ -132,6 +133,8 @@ class InboundMessageCreate(BaseModel):
     group_id: str | None = None
     load_weight: int = Field(default=1, ge=1)
     priority: int = Field(default=0, ge=0)
+    channel_account_id: str | None = Field(default=None, max_length=160)
+    channel_conversation_id: str | None = Field(default=None, max_length=160)
 
 
 class ClaimRequest(BaseModel):
@@ -165,6 +168,22 @@ class StatusChangeRequest(BaseModel):
         ):
             raise ValueError("dados de encerramento só podem ser enviados ao encerrar")
         return self
+
+
+class HandoffRequest(BaseModel):
+    """Solicita transferência do controle da IA para um humano."""
+
+    expected_version: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=500)
+    ai_summary: str | None = Field(default=None, max_length=10_000)
+    take_over: bool = False
+
+
+class AutomationModeCommand(BaseModel):
+    """Comando genérico para retomar IA ou pausar automação."""
+
+    expected_version: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class OutboundMessageCreate(BaseModel):
@@ -263,6 +282,12 @@ class AttendanceRead(BaseModel):
     status: AttendanceStatus
     assignee_id: str | None
     version: int
+    automation_mode: AutomationMode
+    handoff_reason: str | None = None
+    ai_summary: str | None = None
+    automation_updated_at: datetime | None = None
+    channel_account_id: str | None = None
+    channel_conversation_id: str | None = None
     created_at: datetime
     updated_at: datetime
     tags: list[str] = Field(default_factory=list)

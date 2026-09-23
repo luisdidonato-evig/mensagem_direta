@@ -16,10 +16,13 @@ from app.auth import authenticate_token, get_actor
 from app.database import get_session
 from app.domain import (
     ACTIVE_STATUSES,
+    AI_CONTROLLED_MODES,
+    ALLOWED_AUTOMATION_TRANSITIONS,
     ALLOWED_STATUS_TRANSITIONS,
     STALE_THRESHOLDS,
     ActorRole,
     AttendanceStatus,
+    AutomationMode,
     ClosureReason,
     ContactStage,
     DeliveryStatus,
@@ -60,8 +63,10 @@ from app.schemas import (
     AttendanceRead,
     AttendanceSummary,
     AttendanceTagsUpdate,
+    AutomationModeCommand,
     ClaimRequest,
     ContactRead,
+    HandoffRequest,
     ContactStageUpdate,
     ContactUpdate,
     GroupAgentRead,
@@ -635,6 +640,8 @@ async def process_inbound_message(
             group_id=group.id,
             load_weight=payload.load_weight,
             priority=payload.priority,
+            channel_account_id=payload.channel_account_id,
+            channel_conversation_id=payload.channel_conversation_id,
         )
         session.add(attendance)
         session.flush()
@@ -659,6 +666,14 @@ async def process_inbound_message(
                 details={"reason": "customer_replied"},
             )
         )
+
+    if payload.channel_account_id and attendance.channel_account_id != payload.channel_account_id:
+        attendance.channel_account_id = payload.channel_account_id
+    if (
+        payload.channel_conversation_id
+        and attendance.channel_conversation_id != payload.channel_conversation_id
+    ):
+        attendance.channel_conversation_id = payload.channel_conversation_id
 
     message = Message(
         attendance_id=attendance.id,
@@ -717,7 +732,15 @@ async def process_inbound_message(
             AttendanceEvent(
                 attendance_id=attendance.id,
                 type=EventType.MENSAGEM_RECEBIDA,
-                details={"message_id": message.id},
+                details={
+                    "message_id": message.id,
+                    # P0: gateway de IA ainda não integrado. Registramos apenas
+                    # se o domínio consideraria esta mensagem "para a IA" para
+                    # que fluxos futuros possam rotear sem reprocessar. Nada é
+                    # enviado à IA neste estágio.
+                    "ai_candidate": attendance.automation_mode in AI_CONTROLLED_MODES,
+                    "automation_mode": attendance.automation_mode.value,
+                },
             ),
             IntegrationEvent(
                 external_event_id=payload.external_event_id,
@@ -1802,6 +1825,148 @@ async def change_status(
     return attendance
 
 
+_AUTOMATION_EVENT_TYPE = {
+    AutomationMode.HUMAN_REQUESTED: EventType.HANDOFF_SOLICITADO,
+    AutomationMode.HUMAN_ACTIVE: EventType.HANDOFF_SOLICITADO,
+    AutomationMode.AI_ACTIVE: EventType.IA_RETOMADA,
+    AutomationMode.PAUSED: EventType.AUTOMACAO_PAUSADA,
+}
+
+
+def _apply_automation_transition(
+    session: Session,
+    attendance: Attendance,
+    actor: Actor,
+    target: AutomationMode,
+    expected_version: int,
+    reason: str | None,
+    ai_summary: str | None,
+    broadcast_kind: str,
+) -> Attendance:
+    """Aplica transição de modo de automação com trava otimista e auditoria.
+
+    Centraliza validação/versionamento/evento para os três endpoints de handoff
+    (uma única guarda em vez de repetir em cada rota).
+    """
+    ensure_can_operate(attendance, actor)
+    current = attendance.automation_mode
+    if target != current and target not in ALLOWED_AUTOMATION_TRANSITIONS.get(current, set()):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Transição de automação inválida: {current.value} -> {target.value}",
+        )
+
+    values = {
+        "automation_mode": target,
+        "automation_updated_at": now_utc(),
+        "version": Attendance.version + 1,
+        "updated_at": now_utc(),
+    }
+    if reason is not None:
+        values["handoff_reason"] = reason.strip() or None
+    if ai_summary is not None:
+        values["ai_summary"] = ai_summary.strip() or None
+
+    result = session.execute(
+        update(Attendance)
+        .where(
+            Attendance.id == attendance.id,
+            Attendance.company_id == actor.company_id,
+            Attendance.version == expected_version,
+        )
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Versão desatualizada")
+
+    session.add(
+        AttendanceEvent(
+            attendance_id=attendance.id,
+            type=_AUTOMATION_EVENT_TYPE[target],
+            actor_id=actor.id,
+            details={
+                "from_mode": current.value,
+                "to_mode": target.value,
+                "reason": (reason.strip() if reason else None),
+            },
+        )
+    )
+    session.commit()
+    refreshed = load_attendance(session, attendance.id, actor)
+    return refreshed
+
+
+@router.post("/attendances/{attendance_id}/handoff", response_model=AttendanceRead)
+async def request_handoff(
+    attendance_id: str,
+    payload: HandoffRequest,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+) -> Attendance:
+    attendance = load_attendance(session, attendance_id, actor)
+    target = AutomationMode.HUMAN_ACTIVE if payload.take_over else AutomationMode.HUMAN_REQUESTED
+    attendance = _apply_automation_transition(
+        session,
+        attendance,
+        actor,
+        target=target,
+        expected_version=payload.expected_version,
+        reason=payload.reason,
+        ai_summary=payload.ai_summary,
+        broadcast_kind="attendance.handoff_requested",
+    )
+    await broadcast(request, "attendance.handoff_requested", attendance)
+    return attendance
+
+
+@router.post("/attendances/{attendance_id}/resume-ai", response_model=AttendanceRead)
+async def resume_ai(
+    attendance_id: str,
+    payload: AutomationModeCommand,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+) -> Attendance:
+    attendance = load_attendance(session, attendance_id, actor)
+    attendance = _apply_automation_transition(
+        session,
+        attendance,
+        actor,
+        target=AutomationMode.AI_ACTIVE,
+        expected_version=payload.expected_version,
+        reason=payload.reason,
+        ai_summary=None,
+        broadcast_kind="attendance.ai_resumed",
+    )
+    await broadcast(request, "attendance.ai_resumed", attendance)
+    return attendance
+
+
+@router.post("/attendances/{attendance_id}/pause-ai", response_model=AttendanceRead)
+async def pause_ai(
+    attendance_id: str,
+    payload: AutomationModeCommand,
+    request: Request,
+    session: SessionDep,
+    actor: ActorDep,
+) -> Attendance:
+    attendance = load_attendance(session, attendance_id, actor)
+    attendance = _apply_automation_transition(
+        session,
+        attendance,
+        actor,
+        target=AutomationMode.PAUSED,
+        expected_version=payload.expected_version,
+        reason=payload.reason,
+        ai_summary=None,
+        broadcast_kind="attendance.automation_paused",
+    )
+    await broadcast(request, "attendance.automation_paused", attendance)
+    return attendance
+
+
 @router.post("/attendances/{attendance_id}/transfer", response_model=AttendanceRead)
 async def transfer_attendance(
     attendance_id: str,
@@ -1952,6 +2117,7 @@ async def send_message(
                     "contact_id": attendance.contact_id,
                     "content": message.content,
                     "company_id": attendance.company_id,
+                    "channel_conversation_id": attendance.channel_conversation_id,
                     **({"buttons": message.buttons} if message.buttons else {}),
                 },
             ),

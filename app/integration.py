@@ -139,6 +139,51 @@ class MetaCloudApiSender:
         return external_id
 
 
+@dataclass
+class ChannelGatewaySender:
+    """Envia mensagens humanas pelo gateway provider-neutral (POST /internal/v1/proactive-delivery).
+
+    Fallback deve ser um MessageSender (ex.: TenantMetaSender) para casos que o
+    gateway não cobre (anexos) ou quando o payload não carrega channel_conversation_id.
+    """
+
+    base_url: str
+    internal_key: str
+    fallback: "MessageSender | None" = None
+    timeout_seconds: float = 10.0
+    transport: httpx.AsyncBaseTransport | None = None
+
+    async def send(self, payload: dict, idempotency_key: str) -> str | None:
+        # Anexos e interativos (botões/listas) não trafegam pelo gateway:
+        # usa fallback (Meta) ou falha explícita.
+        if payload.get("media") or payload.get("buttons") or payload.get("list_options"):
+            if self.fallback is None:
+                raise RuntimeError("Gateway não envia mídia/interativos e não há fallback configurado")
+            return await self.fallback.send(payload, idempotency_key)
+        conversation_id = payload.get("channel_conversation_id")
+        if not conversation_id:
+            if self.fallback is None:
+                raise RuntimeError("Mensagem sem channel_conversation_id e sem fallback")
+            return await self.fallback.send(payload, idempotency_key)
+        body = {
+            "conversation_id": conversation_id,
+            "text": payload["content"],
+            "idempotency_key": idempotency_key,
+        }
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds, transport=self.transport
+        ) as client:
+            response = await client.post(
+                f"{self.base_url.rstrip('/')}/internal/v1/proactive-delivery",
+                json=body,
+                headers={"X-Internal-Key": self.internal_key},
+            )
+            response.raise_for_status()
+            data = response.json()
+        return data.get("delivery_id")
+
+
+
 class OutboxProcessor:
     def __init__(
         self,

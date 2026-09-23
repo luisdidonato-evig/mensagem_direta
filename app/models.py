@@ -8,6 +8,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from app.domain import (
     ActorRole,
     AttendanceStatus,
+    AutomationMode,
     ClosureReason,
     ContactStage,
     DeliveryStatus,
@@ -83,6 +84,22 @@ class Attendance(Base):
     )
     assignee_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    automation_mode: Mapped[AutomationMode] = mapped_column(
+        Enum(AutomationMode, native_enum=False),
+        default=AutomationMode.AI_ACTIVE,
+        server_default=AutomationMode.AI_ACTIVE.value,
+        nullable=False,
+        index=True,
+    )
+    handoff_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_account_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    channel_conversation_id: Mapped[str | None] = mapped_column(
+        String(160), nullable=True, index=True
+    )
+    automation_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, onupdate=now_utc
