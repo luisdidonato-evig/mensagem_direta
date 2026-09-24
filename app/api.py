@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import hmac
 from typing import Annotated
 from datetime import datetime, timezone
 
@@ -92,10 +93,149 @@ from app.schemas import (
     TransferRequest,
 )
 from app.security import create_access_token, hash_password, verify_password
+from app.internal_contract import InternalInbound, InternalStatus, InternalHandoff
 
 router = APIRouter(prefix="/api/v1")
 SessionDep = Annotated[Session, Depends(get_session)]
 ActorDep = Annotated[Actor, Depends(get_actor)]
+
+
+def require_internal_key(request: Request) -> None:
+    expected = request.app.state.channel_gateway_internal_key
+    supplied = request.headers.get("X-Internal-Key", "")
+    if not expected or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail="Chave interna inválida")
+
+
+def internal_event_key(tenant_id: str, event_id: str, channel_account_id: str = "") -> str:
+    return "gateway:" + hashlib.sha256(
+        f"{tenant_id}:{channel_account_id}:{event_id}".encode()
+    ).hexdigest()
+
+
+@router.post("/internal/messages/inbound", response_model=InboundResult, status_code=201)
+async def receive_internal_message(payload: InternalInbound, request: Request, session: SessionDep) -> InboundResult:
+    require_internal_key(request)
+    tenant = session.get(Company, payload.tenant_id)
+    if tenant is None or not tenant.active:
+        raise HTTPException(status_code=404, detail="Tenant não provisionado")
+    event_key = internal_event_key(payload.tenant_id, f"inbound:{payload.event_id}", payload.channel_account_id)
+    message_key = internal_event_key(payload.tenant_id, f"message:{payload.message_id}", payload.channel_account_id)
+    if payload.message.type == "choice":
+        rating = await process_rating_reply(
+            request, session, tenant_id=payload.tenant_id,
+            contact_id=payload.sender.id, event_id=event_key,
+            message_id=message_key, choice_id=payload.message.choice_id or "",
+            title=payload.message.text,
+            channel_account_id=payload.channel_account_id,
+            conversation_id=payload.conversation_id,
+        )
+        if rating is not None:
+            return rating
+        if (payload.message.choice_id or "").startswith("rating:"):
+            raise HTTPException(status_code=422, detail="Avaliação inválida")
+    result = await process_inbound_message(
+        InboundMessageCreate(
+            external_event_id=event_key,
+            external_message_id=message_key,
+            contact_id=payload.sender.id,
+            content=payload.message.text or payload.message.choice_id or "",
+            company_id=payload.tenant_id,
+            channel_account_id=payload.channel_account_id,
+            channel_conversation_id=payload.conversation_id,
+        ), request, session,
+    )
+    if payload.sender.name:
+        contact = find_contact(session, payload.tenant_id, payload.sender.id)
+        if contact and contact.display_name != payload.sender.name:
+            contact.display_name = payload.sender.name
+            session.commit()
+    return result
+
+
+@router.post("/internal/messages/status")
+async def receive_internal_status(payload: InternalStatus, request: Request, session: SessionDep) -> dict[str, bool]:
+    require_internal_key(request)
+    tenant = session.get(Company, payload.tenant_id)
+    if tenant is None or not tenant.active:
+        raise HTTPException(status_code=404, detail="Tenant não provisionado")
+    mapped = {
+        "QUEUED": DeliveryStatus.ENVIADA_AO_MIDDLEWARE,
+        "SENT": DeliveryStatus.ACEITA_PELO_PROVEDOR,
+        "DELIVERED": DeliveryStatus.ENTREGUE,
+        "READ": DeliveryStatus.LIDA,
+        "FAILED": DeliveryStatus.FALHA,
+    }[payload.status]
+    return {"processed": await process_delivery_status(
+        session, request, tenant_id=payload.tenant_id,
+        event_id=internal_event_key(payload.tenant_id, f"status:{payload.event_id}", payload.channel_account_id or ""),
+        status=mapped, external_id=payload.message_id,
+        outbox_id=payload.idempotency_key,
+    )}
+
+
+@router.post("/internal/handoff", response_model=AttendanceRead)
+async def receive_internal_handoff(payload: InternalHandoff, request: Request, session: SessionDep) -> Attendance:
+    require_internal_key(request)
+    tenant = session.get(Company, payload.tenant_id)
+    if tenant is None or not tenant.active:
+        raise HTTPException(status_code=404, detail="Tenant não provisionado")
+    event_key = internal_event_key(payload.tenant_id, f"handoff:{payload.event_id}", payload.channel_account_id)
+    previous = session.get(IntegrationEvent, event_key)
+    if previous:
+        attendance = load_attendance(session, previous.attendance_id)
+        if attendance.company_id != payload.tenant_id:
+            raise HTTPException(status_code=409, detail="Evento pertence a outro tenant")
+        return attendance
+    attendance = session.scalar(select(Attendance).where(
+        Attendance.company_id == payload.tenant_id,
+        Attendance.channel_account_id == payload.channel_account_id,
+        Attendance.channel_conversation_id == payload.conversation_id,
+        Attendance.status.in_(ACTIVE_STATUSES),
+    ).order_by(Attendance.created_at.desc()))
+    if attendance is None:
+        group = session.scalar(select(ServiceGroup).where(
+            ServiceGroup.company_id == payload.tenant_id,
+            ServiceGroup.active.is_(True),
+        ).order_by(ServiceGroup.created_at))
+        if group is None:
+            raise HTTPException(status_code=422, detail="Tenant sem grupo ativo")
+        contact_id = payload.sender_id or payload.conversation_id
+        if find_contact(session, payload.tenant_id, contact_id) is None:
+            session.add(Contact(id=new_id(), company_id=payload.tenant_id, external_id=contact_id))
+        attendance = Attendance(
+            contact_id=contact_id, company_id=payload.tenant_id, group_id=group.id,
+            channel_account_id=payload.channel_account_id,
+            channel_conversation_id=payload.conversation_id,
+        )
+        session.add(attendance)
+        session.flush()
+        session.add(AttendanceEvent(
+            attendance_id=attendance.id, type=EventType.CRIADO,
+            to_status=AttendanceStatus.AGUARDANDO,
+            details={"source": "internal_handoff"},
+        ))
+    actor = Actor(id="middleware", role=ActorRole.ADMIN, company_id=payload.tenant_id)
+    if attendance.automation_mode != AutomationMode.HUMAN_REQUESTED:
+        attendance = _apply_automation_transition(
+            session, attendance, actor, AutomationMode.HUMAN_REQUESTED,
+            attendance.version, payload.reason, payload.summary,
+            "attendance.handoff_requested",
+            commit=False,
+        )
+    session.add(IntegrationEvent(
+        external_event_id=event_key, attendance_id=attendance.id, message_id="",
+    ))
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        previous = session.get(IntegrationEvent, event_key)
+        if previous is None:
+            raise
+        attendance = load_attendance(session, previous.attendance_id)
+    await broadcast(request, "attendance.handoff_requested", attendance)
+    return attendance
 
 
 @router.post("/auth/login", response_model=TokenResponse)
@@ -481,6 +621,9 @@ async def pull_attendance(
 
     attendance.assignee_id = actor.id
     attendance.status = AttendanceStatus.EM_ATENDIMENTO
+    if attendance.automation_mode == AutomationMode.HUMAN_REQUESTED:
+        attendance.automation_mode = AutomationMode.HUMAN_ACTIVE
+        attendance.automation_updated_at = now_utc()
     attendance.version += 1
     attendance.updated_at = now_utc()
     session.add(
@@ -619,11 +762,29 @@ async def process_inbound_message(
             raise HTTPException(status_code=500, detail="Evento processado sem mensagem")
         return InboundResult(attendance=attendance, message=message, duplicate=True)
 
+    previous_message = session.scalar(select(Message).where(Message.external_id == payload.external_message_id))
+    if previous_message is not None:
+        attendance = load_attendance(session, previous_message.attendance_id)
+        if attendance.company_id != group.company_id:
+            raise HTTPException(status_code=409, detail="Mensagem externa pertence a outra empresa")
+        return InboundResult(attendance=attendance, message=previous_message, duplicate=True)
+
     contact = find_contact(session, group.company_id, payload.contact_id)
     if contact is None:
         session.add(Contact(id=new_id(), company_id=group.company_id, external_id=payload.contact_id))
 
-    attendance = session.scalar(
+    attendance = None
+    if payload.channel_account_id and payload.channel_conversation_id:
+        attendance = session.scalar(select(Attendance).where(
+            Attendance.company_id == group.company_id,
+            Attendance.channel_account_id == payload.channel_account_id,
+            Attendance.channel_conversation_id == payload.channel_conversation_id,
+            Attendance.status.in_(ACTIVE_STATUSES),
+        ).order_by(Attendance.created_at.desc()))
+        if attendance is not None and attendance.contact_id != payload.contact_id:
+            attendance.contact_id = payload.contact_id
+
+    attendance_query = (
         select(Attendance)
         .where(
             Attendance.contact_id == payload.contact_id,
@@ -632,6 +793,16 @@ async def process_inbound_message(
         )
         .order_by(Attendance.created_at.desc())
     )
+    if payload.channel_account_id:
+        attendance_query = attendance_query.where(
+            Attendance.channel_account_id == payload.channel_account_id
+        )
+    if payload.channel_conversation_id:
+        attendance_query = attendance_query.where(
+            Attendance.channel_conversation_id == payload.channel_conversation_id
+        )
+    if attendance is None:
+        attendance = session.scalar(attendance_query)
     created = attendance is None
     if created:
         attendance = Attendance(
@@ -704,6 +875,8 @@ async def process_inbound_message(
                     "contact_id": attendance.contact_id,
                     "content": waiting_reply.content,
                     "company_id": attendance.company_id,
+                    "channel_account_id": attendance.channel_account_id,
+                    "channel_conversation_id": attendance.channel_conversation_id,
                 },
             ),
             AttendanceEvent(
@@ -820,46 +993,42 @@ DELIVERY_RANK = {
 }
 
 
-async def process_meta_status(status: dict, request: Request, session: Session, company_id: str | None = None) -> bool:
-    external_id = status.get("id")
-    mapped = META_STATUS_MAP.get(status.get("status"))
-    if not external_id or mapped is None:
-        return False
-    fingerprint = hashlib.sha256(
-        json.dumps(status, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    event_id = f"meta-status:{fingerprint}"
+async def process_delivery_status(
+    session: Session, request: Request, *, tenant_id: str | None,
+    event_id: str, status: DeliveryStatus, external_id: str | None,
+    outbox_id: str | None = None,
+) -> bool:
     if session.get(IntegrationEvent, event_id):
         return True
-    message = session.scalar(select(Message).where(Message.external_id == external_id))
+    outbox = session.get(OutboxMessage, outbox_id) if outbox_id else None
+    message = session.get(Message, outbox.message_id) if outbox else None
+    if message is None and external_id:
+        message = session.scalar(select(Message).where(Message.external_id == external_id))
     if message is None:
-        callback_id = status.get("biz_opaque_callback_data")
-        outbox = session.get(OutboxMessage, callback_id) if callback_id else None
-        if outbox is None:
-            return False
-        message = session.get(Message, outbox.message_id)
-        if message is None or (message.external_id and message.external_id != external_id):
+        return False
+    attendance = session.get(Attendance, message.attendance_id)
+    if attendance is None or (tenant_id is not None and attendance.company_id != tenant_id):
+        session.rollback()
+        return False
+    if external_id and message.external_id != external_id:
+        other = session.scalar(select(Message).where(Message.external_id == external_id))
+        if other is not None and other.id != message.id:
             return False
         message.external_id = external_id
-        outbox.processed_at = now_utc()
-    if company_id is not None:
-        attendance = session.get(Attendance, message.attendance_id)
-        if attendance is None or attendance.company_id != company_id:
-            session.rollback()
-            return False
     current_rank = DELIVERY_RANK.get(message.delivery_status, 0)
-    next_rank = DELIVERY_RANK[mapped]
-    outbox = session.scalar(
-        select(OutboxMessage).where(OutboxMessage.message_id == message.id)
-    )
-    if mapped == DeliveryStatus.FALHA:
+    next_rank = DELIVERY_RANK[status]
+    if outbox is None:
+        outbox = session.scalar(
+            select(OutboxMessage).where(OutboxMessage.message_id == message.id)
+        )
+    if status == DeliveryStatus.FALHA:
         if current_rank < DELIVERY_RANK[DeliveryStatus.ENTREGUE]:
-            message.delivery_status = mapped
+            message.delivery_status = status
             if outbox is not None:
                 outbox.processed_at = None
                 outbox.attempts = DEFAULT_MAX_ATTEMPTS
-    elif next_rank >= current_rank:
-        message.delivery_status = mapped
+    elif message.delivery_status != DeliveryStatus.FALHA and next_rank >= current_rank:
+        message.delivery_status = status
         if outbox is not None:
             outbox.processed_at = outbox.processed_at or now_utc()
     session.add(
@@ -870,43 +1039,65 @@ async def process_meta_status(status: dict, request: Request, session: Session, 
         )
     )
     session.commit()
-    attendance = load_attendance(session, message.attendance_id)
     await broadcast(request, "message.status_changed", attendance)
     return True
 
 
-async def process_meta_rating(
-    item: dict, reply: dict, request: Request, session: Session, company_id: str | None
-) -> tuple[bool, bool]:
-    parts = (reply.get("id") or "").split(":")
+async def process_meta_status(status: dict, request: Request, session: Session, company_id: str | None = None) -> bool:
+    external_id = status.get("id")
+    mapped = META_STATUS_MAP.get(status.get("status"))
+    if not external_id or mapped is None:
+        return False
+    fingerprint = hashlib.sha256(
+        json.dumps(status, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return await process_delivery_status(
+        session, request, tenant_id=company_id,
+        event_id=f"meta-status:{fingerprint}", status=mapped,
+        external_id=external_id, outbox_id=status.get("biz_opaque_callback_data"),
+    )
+
+
+async def process_rating_reply(
+    request: Request, session: Session, *, tenant_id: str | None,
+    contact_id: str, event_id: str, message_id: str,
+    choice_id: str, title: str | None,
+    channel_account_id: str | None = None, conversation_id: str | None = None,
+) -> InboundResult | None:
+    parts = choice_id.split(":")
     if len(parts) != 3 or parts[0] != "rating" or parts[2] not in {"1", "2", "3", "4", "5"}:
-        return False, False
+        return None
     attendance = session.get(Attendance, parts[1])
     if (
         attendance is None or attendance.status != AttendanceStatus.ENCERRADO
-        or attendance.contact_id != item.get("from")
-        or (company_id is not None and attendance.company_id != company_id)
+        or attendance.contact_id != contact_id
+        or (tenant_id is not None and attendance.company_id != tenant_id)
+        or (channel_account_id is not None and attendance.channel_account_id != channel_account_id)
+        or (conversation_id is not None and attendance.channel_conversation_id != conversation_id)
     ):
-        return False, False
-    event_id = f"meta-message:{item.get('id')}"
-    if session.get(IntegrationEvent, event_id):
-        return True, True
+        return None
+    processed = session.get(IntegrationEvent, event_id)
+    if processed:
+        message = session.get(Message, processed.message_id)
+        return InboundResult(attendance=attendance, message=message, duplicate=True) if message else None
     survey = session.scalar(select(Message.id).where(
         Message.attendance_id == attendance.id,
         Message.interaction_kind == "list",
         Message.direction == MessageDirection.SAIDA,
     ))
     if survey is None:
-        return False, False
-    if session.get(AttendanceRating, attendance.id):
-        return True, True
+        return None
+    previous_rating = session.get(AttendanceRating, attendance.id)
+    if previous_rating:
+        message = session.get(Message, previous_rating.message_id)
+        return InboundResult(attendance=attendance, message=message, duplicate=True) if message else None
     message = Message(
         id=new_id(),
         attendance_id=attendance.id,
-        external_id=item["id"],
+        external_id=message_id,
         direction=MessageDirection.ENTRADA,
         sender_type=SenderType.CLIENTE,
-        content=reply.get("title") or f"Nota {parts[2]}",
+        content=title or f"Nota {parts[2]}",
         delivery_status=DeliveryStatus.RECEBIDA,
     )
     session.add(message)
@@ -922,11 +1113,28 @@ async def process_meta_rating(
         session.commit()
     except IntegrityError:
         session.rollback()
-        if session.get(AttendanceRating, attendance.id) or session.get(IntegrationEvent, event_id):
-            return True, True
+        previous_rating = session.get(AttendanceRating, attendance.id)
+        if previous_rating:
+            previous_message = session.get(Message, previous_rating.message_id)
+            if previous_message:
+                return InboundResult(attendance=attendance, message=previous_message, duplicate=True)
         raise
     await broadcast(request, "attendance.rated", attendance)
-    return True, False
+    return InboundResult(attendance=attendance, message=message, duplicate=False)
+
+
+async def process_meta_rating(
+    item: dict, reply: dict, request: Request, session: Session, company_id: str | None
+) -> tuple[bool, bool]:
+    if not item.get("id") or not item.get("from"):
+        return False, False
+    result = await process_rating_reply(
+        request, session, tenant_id=company_id,
+        contact_id=item["from"], event_id=f"meta-message:{item['id']}",
+        message_id=item["id"], choice_id=reply.get("id") or "",
+        title=reply.get("title"),
+    )
+    return (result is not None, result.duplicate if result else False)
 
 
 @router.post("/integrations/meta/whatsapp/webhook")
@@ -1703,6 +1911,7 @@ async def claim_attendance(
 ) -> Attendance:
     attendance = load_attendance(session, attendance_id, actor)
     ensure_claim_capacity(session, attendance, actor)
+    human_handoff = attendance.automation_mode == AutomationMode.HUMAN_REQUESTED
     statement = (
         update(Attendance)
         .where(
@@ -1714,6 +1923,8 @@ async def claim_attendance(
         .values(
             assignee_id=actor.id,
             status=AttendanceStatus.EM_ATENDIMENTO,
+            automation_mode=AutomationMode.HUMAN_ACTIVE if human_handoff else attendance.automation_mode,
+            automation_updated_at=now_utc() if human_handoff else attendance.automation_updated_at,
             version=Attendance.version + 1,
             updated_at=now_utc(),
         )
@@ -1816,6 +2027,8 @@ async def change_status(
                 "company_id": attendance.company_id,
                 "contact_id": attendance.contact_id,
                 "content": survey.content,
+                "channel_account_id": attendance.channel_account_id,
+                "channel_conversation_id": attendance.channel_conversation_id,
                 "list_options": survey_options,
             },
         ))
@@ -1842,6 +2055,7 @@ def _apply_automation_transition(
     reason: str | None,
     ai_summary: str | None,
     broadcast_kind: str,
+    commit: bool = True,
 ) -> Attendance:
     """Aplica transição de modo de automação com trava otimista e auditoria.
 
@@ -1892,7 +2106,11 @@ def _apply_automation_transition(
             },
         )
     )
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
+        session.expire(attendance)
     refreshed = load_attendance(session, attendance.id, actor)
     return refreshed
 
@@ -2117,6 +2335,7 @@ async def send_message(
                     "contact_id": attendance.contact_id,
                     "content": message.content,
                     "company_id": attendance.company_id,
+                    "channel_account_id": attendance.channel_account_id,
                     "channel_conversation_id": attendance.channel_conversation_id,
                     **({"buttons": message.buttons} if message.buttons else {}),
                 },
@@ -2196,6 +2415,8 @@ async def send_attachment(
                     "attendance_id": attendance.id,
                     "contact_id": attendance.contact_id,
                     "company_id": attendance.company_id,
+                    "channel_account_id": attendance.channel_account_id,
+                    "channel_conversation_id": attendance.channel_conversation_id,
                     "content": message.content,
                     "media": {
                         "storage_key": storage_key,

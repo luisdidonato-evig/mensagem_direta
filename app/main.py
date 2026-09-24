@@ -206,6 +206,7 @@ def create_app(
     app.state.meta_default_group_id = resolved_default_group_id
     app.state.enable_simulator = simulator_enabled
     app.state.outbox_processor = outbox_processor
+    app.state.channel_gateway_internal_key = resolved_gateway_key
     app.state.jwt_secret = resolved_jwt_secret
     app.state.media_storage_dir = resolved_media_dir
     app.state.meta_media_downloader = MetaMediaDownloader(

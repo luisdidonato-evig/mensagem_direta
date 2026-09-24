@@ -141,11 +141,7 @@ class MetaCloudApiSender:
 
 @dataclass
 class ChannelGatewaySender:
-    """Envia mensagens humanas pelo gateway provider-neutral (POST /internal/v1/proactive-delivery).
-
-    Fallback deve ser um MessageSender (ex.: TenantMetaSender) para casos que o
-    gateway não cobre (anexos) ou quando o payload não carrega channel_conversation_id.
-    """
+    """Envia mensagens pelo contrato interno de mensagens do gateway."""
 
     base_url: str
     internal_key: str
@@ -154,33 +150,58 @@ class ChannelGatewaySender:
     transport: httpx.AsyncBaseTransport | None = None
 
     async def send(self, payload: dict, idempotency_key: str) -> str | None:
-        # Anexos e interativos (botões/listas) não trafegam pelo gateway:
-        # usa fallback (Meta) ou falha explícita.
-        if payload.get("media") or payload.get("buttons") or payload.get("list_options"):
+        # Upload local ainda não produz asset_id reconhecido pelo gateway.
+        if payload.get("media") and not payload["media"].get("asset_id"):
             if self.fallback is None:
-                raise RuntimeError("Gateway não envia mídia/interativos e não há fallback configurado")
+                raise RuntimeError("Mídia sem asset_id do gateway e sem fallback configurado")
             return await self.fallback.send(payload, idempotency_key)
         conversation_id = payload.get("channel_conversation_id")
-        if not conversation_id:
+        account_id = payload.get("channel_account_id")
+        if not conversation_id and not account_id:
             if self.fallback is None:
-                raise RuntimeError("Mensagem sem channel_conversation_id e sem fallback")
+                raise RuntimeError("Mensagem sem destino de canal e sem fallback")
             return await self.fallback.send(payload, idempotency_key)
+        if payload.get("media"):
+            media = payload["media"]
+            message = {
+                "kind": "document" if media["mime_type"] == "application/pdf" else "image",
+                "asset": {"asset_id": media["asset_id"], "content_type": media["mime_type"], "filename": media["filename"]},
+                "body": media.get("caption") or None,
+            }
+        elif payload.get("buttons") or payload.get("list_options"):
+            options = payload.get("buttons") or payload.get("list_options")
+            message = {
+                "kind": "choices" if payload.get("buttons") else "list",
+                "body": payload["content"],
+                "options": [{"id": option["id"], "label": option["title"]} for option in options],
+            }
+        else:
+            message = {"kind": "text", "text": payload["content"]}
         body = {
-            "conversation_id": conversation_id,
-            "text": payload["content"],
+            "tenant_id": payload.get("tenant_id") or payload.get("company_id"),
+            "message": message,
             "idempotency_key": idempotency_key,
+            "source": "atendimento",
         }
+        if conversation_id:
+            body["conversation_id"] = conversation_id
+        else:
+            body["channel_account_id"] = account_id
+            body["recipient_id"] = payload["contact_id"]
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds, transport=self.transport
         ) as client:
             response = await client.post(
-                f"{self.base_url.rstrip('/')}/internal/v1/proactive-delivery",
+                f"{self.base_url.rstrip('/')}/internal/v1/messages",
                 json=body,
                 headers={"X-Internal-Key": self.internal_key},
             )
             response.raise_for_status()
             data = response.json()
-        return data.get("delivery_id")
+        delivery_id = data.get("delivery_id")
+        if response.status_code != 202 or data.get("status") != "queued" or not delivery_id:
+            raise RuntimeError("Gateway não confirmou enfileiramento da mensagem")
+        return delivery_id
 
 
 
@@ -223,12 +244,32 @@ class OutboxProcessor:
                 if outbox is None or outbox.processed_at is not None:
                     continue
                 external_id = await self.sender.send(outbox.payload, outbox.id)
+                # Callback de status pode chegar enquanto o HTTP acima aguarda.
+                session.expire_all()
+                outbox = session.get(OutboxMessage, outbox_id)
                 message = session.get(Message, outbox.message_id)
                 if message is None:
                     raise RuntimeError("Outbox sem mensagem associada")
-                message.external_id = external_id or message.external_id
-                message.delivery_status = DeliveryStatus.ACEITA_PELO_PROVEDOR
-                outbox.processed_at = datetime.now(timezone.utc)
+                if external_id and not message.external_id:
+                    message.external_id = external_id
+                accepted_status = (
+                    DeliveryStatus.ENVIADA_AO_MIDDLEWARE
+                    if isinstance(self.sender, ChannelGatewaySender)
+                    and (outbox.payload.get("channel_conversation_id") or outbox.payload.get("channel_account_id"))
+                    and not (outbox.payload.get("media") and not outbox.payload["media"].get("asset_id"))
+                    else DeliveryStatus.ACEITA_PELO_PROVEDOR
+                )
+                progress = {
+                    DeliveryStatus.PENDENTE: 0,
+                    DeliveryStatus.ENVIADA_AO_MIDDLEWARE: 1,
+                    DeliveryStatus.ACEITA_PELO_PROVEDOR: 2,
+                    DeliveryStatus.ENTREGUE: 3,
+                    DeliveryStatus.LIDA: 4,
+                }
+                if message.delivery_status in progress and progress[message.delivery_status] < progress[accepted_status]:
+                    message.delivery_status = accepted_status
+                if message.delivery_status != DeliveryStatus.FALHA:
+                    outbox.processed_at = outbox.processed_at or datetime.now(timezone.utc)
                 session.commit()
                 delivered += 1
             except Exception as exc:

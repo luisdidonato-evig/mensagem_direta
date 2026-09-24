@@ -1,5 +1,7 @@
 # Centro de Atendimento
 
+Integração com gateway, entradas internas e limites atuais: [docs/integracao-middleware.md](docs/integracao-middleware.md).
+
 Primeira fatia vertical do atendimento compartilhado: fila central, entrada simulada, atribuição atômica, mensagens, status, transferência, perfil de contato, tags, notas internas, encerramento categorizado, métricas, auditoria, outbox e eventos em tempo real.
 
 ## Requisitos
@@ -85,13 +87,13 @@ Quando `ENABLE_SIMULATOR=true` (padrão em dev/teste), a aplicação semeia auto
 | `supervisor-1` | `SUPERVISOR` |
 | `admin-1` | `ADMIN` |
 
-Essa semente **nunca roda com `ENABLE_SIMULATOR=false`**. Para cadastrar empresa, grupo inicial e administrador em produção, rode `python -m alembic upgrade head` e `python -m app.provision_tenant --company "Nome" --admin-id admin-empresa` (senha solicitada no terminal). IDs de usuários são únicos em todo o banco.
+Essa semente **nunca roda com `ENABLE_SIMULATOR=false`**. Para cadastrar empresa, grupo inicial e administrador em produção, rode `python -m alembic upgrade head` e `python -m app.provision_tenant --company "Nome" --admin-id admin-empresa --tenant-id UUID-DO-GATEWAY` (senha solicitada no terminal). `--tenant-id` é obrigatório para integrar tenant já existente no gateway; sem ele, o comando gera UUID local. IDs de usuários são únicos em todo o banco.
 
 Configure `JWT_SECRET` no ambiente antes de produção — sem ele a API gera um segredo efêmero a cada subida e todo mundo é deslogado no próximo restart (aceitável em dev, não em produção).
 
 ## WhatsApp Cloud API (Meta)
 
-Copie `.env.example` para `.env` ou configure as variáveis no ambiente. A aplicação recebe diretamente o webhook da Meta, valida `X-Hub-Signature-256` com o App Secret e envia texto pela Graph API. Não há middleware intermediário.
+Copie `.env.example` para `.env` ou configure as variáveis no ambiente. O adapter legado recebe diretamente o webhook da Meta e valida `X-Hub-Signature-256` com o App Secret. Com `CHANNEL_GATEWAY_URL`, o envio de texto e interativos usa o gateway; mídia local ainda usa fallback Meta quando configurado.
 
 Contrato e configuração: [`docs/integracao-meta-whatsapp.md`](docs/integracao-meta-whatsapp.md).
 
