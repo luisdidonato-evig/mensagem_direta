@@ -659,6 +659,10 @@ function renderDetail() {
   $("#profile-team").textContent = item.team_id || "Não definida";
   $("#profile-group").textContent = state.groups.find((group) => group.id === item.group_id)?.name || item.queue_id;
   $("#profile-rating").textContent = item.rating ? `${item.rating.score}/5 estrelas` : "Ainda não avaliado";
+  const automationLabels = { AI_ACTIVE: "IA ativa", HUMAN_REQUESTED: "Aguardando humano", HUMAN_ACTIVE: "Atendimento humano", PAUSED: "Automação pausada" };
+  $("#profile-automation").textContent = automationLabels[item.automation_mode] || item.automation_mode;
+  $("#profile-handoff-field").hidden = !item.handoff_reason && !item.ai_summary;
+  $("#profile-handoff").textContent = [item.handoff_reason, item.ai_summary].filter(Boolean).join(" · ");
   $("#profile-stage").value = contact.stage || "NAO_CLASSIFICADO";
   $("#compose-contact").textContent = item.contact_id;
   $("#profile-tags").innerHTML = contact.tags.length

@@ -15,7 +15,13 @@ from app.analytics import process_analytics_outbox
 from app.api import router
 from app.database import Database
 from app.domain import ActorRole
-from app.integration import MetaCloudApiSender, OutboxProcessor, TenantMetaSender, run_outbox_worker
+from app.integration import (
+    ChannelGatewaySender,
+    MetaCloudApiSender,
+    OutboxProcessor,
+    TenantMetaSender,
+    run_outbox_worker,
+)
 from app.media import MetaMediaDownloader
 from app.models import Agent, Company, GroupAgent, ServiceGroup
 from app.realtime import ConnectionManager
@@ -81,6 +87,9 @@ def create_app(
     jwt_secret: str | None = None,
     media_storage_dir: str | None = None,
     meta_tenants: list[dict] | None = None,
+    channel_gateway_url: str | None = None,
+    channel_gateway_internal_key: str | None = None,
+    channel_gateway_transport=None,
 ) -> FastAPI:
     project_root = Path(__file__).resolve().parent.parent
     resolved_url = database_url or os.getenv(
@@ -136,6 +145,9 @@ def create_app(
             "JWT_SECRET não configurado — usando segredo efêmero gerado em memória; "
             "tokens ficam inválidos a cada reinício. Defina JWT_SECRET antes de produção."
         )
+    resolved_gateway_url = channel_gateway_url if channel_gateway_url is not None else os.getenv("CHANNEL_GATEWAY_URL", "")
+    resolved_gateway_key = channel_gateway_internal_key or os.getenv("CHANNEL_GATEWAY_INTERNAL_KEY", "")
+
     outbox_processor = None
     legacy_sender = None
     if resolved_access_token and resolved_phone_number_id and not tenant_configs:
@@ -146,10 +158,20 @@ def create_app(
                 media_storage_dir=resolved_media_dir,
         )
         senders_by_company.setdefault(DEV_COMPANY_ID, legacy_sender)
-    if senders_by_company:
-        outbox_processor = OutboxProcessor(
-            database.session_factory, TenantMetaSender(senders_by_company, legacy_sender)
+    meta_sender = TenantMetaSender(senders_by_company, legacy_sender) if senders_by_company else None
+    # Gateway assume o envio humano quando configurado; Meta permanece como fallback
+    # (anexos e conversas sem channel_conversation_id) para preservar testes existentes.
+    if resolved_gateway_url:
+        outbox_sender = ChannelGatewaySender(
+            base_url=resolved_gateway_url,
+            internal_key=resolved_gateway_key,
+            fallback=meta_sender,
+            transport=channel_gateway_transport,
         )
+    else:
+        outbox_sender = meta_sender
+    if outbox_sender is not None:
+        outbox_processor = OutboxProcessor(database.session_factory, outbox_sender)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -184,6 +206,7 @@ def create_app(
     app.state.meta_default_group_id = resolved_default_group_id
     app.state.enable_simulator = simulator_enabled
     app.state.outbox_processor = outbox_processor
+    app.state.channel_gateway_internal_key = resolved_gateway_key
     app.state.jwt_secret = resolved_jwt_secret
     app.state.media_storage_dir = resolved_media_dir
     app.state.meta_media_downloader = MetaMediaDownloader(
